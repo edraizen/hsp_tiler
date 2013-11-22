@@ -1,15 +1,22 @@
 
 import sys
 import xml.etree.cElementTree as ET
+import re
 
 class BlastXMLParser(object):
-	def __init__(self, blast):
+	def __init__(self, blast, allHits=False, taxFilter=None):
 		"""Intialise a BLAST XML parser. Easily separate Iterations, Hits, and
 		HSPs without loading all of the data into memory.
 
 		Parameters:
 		blast - a file-like object containg BLAST XML output
+		allHSP - Use all of the HSP instead of first, top hit
+		filter - Ignore hits from given species or genus
 		"""
+		#Use all of the HSP instead of first, top hit
+		self.allHits = allHits
+		#Save species name or genus and ignore hits from them
+		self.taxFilter = taxFilter
 		#Build iter to loop over XML
 		self.context = iter(ET.iterparse(blast, events=("start", "end")))
 		#Boolean to allow hits to be returned
@@ -31,18 +38,29 @@ class BlastXMLParser(object):
 		for event, elem in self.context:
 			if event == "end" and elem.tag == "Iteration_query-def":
 				queryID = elem.text
-				continue
-			if self.runHSP and event == "start" and elem.tag == "Hit":
-				self.runHSP = False
 				yield queryID
+			if self.runHSP and event == "start" and elem.tag == "Hit":
+				self.runHSP = self.allHits #Continue looking for hits if allHits is True
 			if not self.runHSP and event == "end" and elem.tag == "Iteration_hits":
 				self.runHSP = True
 
 	def parseHsp(self):
 		"""Process each HSP for a given hit. Must be called during parseQuery.
+		Return: XML object of HSP
 		"""
+		returnHsp = False
 		for event, elem in self.context:
-			if event == "end" and elem.tag == "Hsp":
+			if event == "end" and elem.tag == "Hit_def":
+				returnHsp = not self.taxFilter
+				if self.taxFilter:
+					try:
+						taxInfo = re.findall("^.+\[(.+)\]", elem.text)[0]
+						if self.taxFilter not in taxInfo:
+							returnHsp = True
+					except:
+						pass
+
+			if returnHsp and event == "end" and elem.tag == "Hsp":
 				yield elem
 			if event == "end" and elem.tag == "Hit_hsps":
 				break

@@ -9,14 +9,15 @@ class Sequence(object):
     def __init__(self):
         #Initialize an empty sequence
         self.name = ""
+        self.description = ""
         self.sequence = ""
-        self.score = None
 
     def __len__(self):
         return len(self.sequence)
 
     def __str__(self):
-        tmp = ">{} [length={}]\n".format(self.name, len(self))
+        space = len(self.description)>0 and " " or ""
+        tmp = ">{}{}{}\n".format(self.name, space, self.description)
         for i in range(0, len(self.sequence), 60):
             tmp += "{}\n".format(self.sequence[i:i+60])
         return tmp[:-1]
@@ -47,8 +48,12 @@ def read_fasta(inFile, alphabet=None):
             #Start new sequence and get id and comment
             fastaSeq = Sequence()
             
-            #Lines can be split by whitecap or a ,
-            fastaSeq.name = line[1:]
+            #Get name and desciption
+            try:
+                fastaSeq.name, fastaSeq.description = line[1:].split(None, 1)
+            except:
+                fastaSeq.name = line[1:]
+
                 
             empty = False
         elif fastaSeq is None:
@@ -67,5 +72,5 @@ on line '{}'".format(line)
         yield fastaSeq
     
     #Warn if empty or has errors
-    if empty and verbose:
+    if empty:
         print >> sys.stderr, "WARNING: fastaFile has no sequences."
