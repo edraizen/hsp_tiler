@@ -10,12 +10,14 @@ import os, sys
 import re
 import string
 from collections import deque
-from itertools import izip, tee
-import subprocess
+from itertools import izip, product, tee
+from datetime import datetime
 
 #Custom Libraries
 from read_fasta import read_fasta
 from BlastXMLParser import BlastXMLParser
+from count_kmers import count_kmers, IUPAC_N
+from read_codon_usage import read_codon_frequencies
 
 #######################################
 #Classes
@@ -41,15 +43,17 @@ class Hsp(object):
 
         Input:
         hsp - Element object containing HSP information
-        contig - Seqeunce object
+        contig - Sequence object
         """
         # 1 = frames 1,2,3 -1 = frames -1,-2,-3 
         if 3 >= int(hsp.find('Hsp_query-frame').text) > 0:
             self.strand = 1
         elif 0 > int(hsp.find('Hsp_query-frame').text) >= -3:
             self.strand = -1
-        else: # Something is wrong - exit here!
+        else: 
+            # Something is wrong - exit here!
             raise SystemExit ('Cannot parse HSP data correctly')
+        
         self.frame = abs(int(hsp.find('Hsp_query-frame').text))
         self.query_start = int(hsp.find('Hsp_query-from').text) #position in nts relative to query
         self.query_end = int(hsp.find('Hsp_query-to').text)
@@ -57,6 +61,8 @@ class Hsp(object):
         self.hit_end = int(hsp.find('Hsp_hit-to').text)
         self.evalue = float(hsp.find('Hsp_evalue').text)
         self.score = float(hsp.find('Hsp_score').text)
+        self.bitscore = float(hsp.find('Hsp_bit-score').text)
+        self.hitID = hsp.find("hitID").text
         self.aa_seq = self.remove_x(hsp,contig) 
         self.used = False # True marks hsps that have already been incorporated into the tile
         self.num = int(hsp.find('Hsp_num').text)
@@ -82,12 +88,14 @@ class Hsp(object):
         end = re.sub(r'[X|x]', r'.', no_x[-3:]) # last 3 aas
         end = re.sub(r'\*', r'.', end)
         matches = self.match(len(no_x), contig, start, end)
-        if len(matches) != 1: # if there are no matches, try looking for unknown bases as well
+        if len(matches) != 1: 
+            # if there are no matches, try looking for unknown bases as well
             start= "({}|J)({}|J)({}|J)".format(*start)
             end = "({}|J)({}|J)({}|J)".format(*end)
-            matches = self.match(no_x, contig, start, end)
+            matches = self.match(len(no_x), contig, start, end)
         match = matches[0].group() # and assuming there is only one match, the index is correct
-        if len(match) != len(no_x): # sanity check
+        if len(match) != len(no_x): 
+            # sanity check
             raise SystemExit("Cannot match HSP {} to Contig {}".format(hsp.num, contig.name))
         else:
             while 'X' in no_x:
@@ -102,7 +110,7 @@ class Hsp(object):
     def match(self, len_seq, contig, start, end):
         """Find the protein sequence encoded by the contig 
         that matches the hsp query sequence. Uses the first
-        three and last three aas, separted by any character.
+        three and last three aas, separated by any character.
         from the query to build a regular extansion,
 
         Input:
@@ -134,16 +142,18 @@ class Hsp(object):
 class Tile_Path(object):
     """An object to hold information about the tile and 
     methods for adding new HSPs to the tile. If an HSP 
-    is added 5’ of the tile, it is appended to the left 
-    of the queue and if it is added 3’ of the tile, it is 
+    is added 5' of the tile, it is appended to the left 
+    of the queue and if it is added 3' of the tile, it is 
     appended to the right of the list. In this way, the 
     order of the HSPs in the list represents the order of 
-    HSPs in the tile form 5’ to 3’. The nucleotide 
+    HSPs in the tile form 5' to 3'. The nucleotide 
     sequence of the tile is derived by slicing the 
     appropriate portion of the contig sequence using the 
     indices for the start and end positions of the HSPs.
+
+    If best_hsp is None, then there were no hits.
     """
-    def __init__(self, best_hsp, contig): 
+    def __init__(self, best_hsp, contig, saveProteinCoding=True,  codon_usage=None): 
         """Initialise the tile with a single HSP to signify the start 
         and end positions of the tile relative to the contig and the 
         protein sequence of the tile.
@@ -151,6 +161,7 @@ class Tile_Path(object):
         Input:
         best_hsp - Hsp object of the highest scoring Hsp
         contig - Sequence object of the parent contig
+        usage - a dictionary containg the codon usage, must be precomputed using read_codon_usage
         """
         #Positions are of tiled construct relative to contig (query)
         self.contig = contig
@@ -163,6 +174,10 @@ class Tile_Path(object):
         self.frame = best_hsp.frame
         self.added = True # Has anything been added this iteration? Initialise as true to allow loop to start! 
         self.tile = False # Has anything other than the first hsp been added to the tile?
+        self.codon_usage = codon_usage
+        self.score = best_hsp.score
+        self.description = "[GI={};S={}]".format(best_hsp.hitID, best_hsp.bitscore)
+        self.saveProteinCoding = True
 
     def __str__(self):
         """Print tile sequence if changes have been made, 
@@ -173,7 +188,7 @@ class Tile_Path(object):
         else:
             seq = self.contig.sequence
 
-        tmp = ">{}\n".format(self.contig.name)
+        tmp = ">{} {}\n".format(self.contig.name, self.description)
         for i in range(0, len(seq), 60):
             tmp += "{}\n".format(seq[i:i+60])
         return tmp[:-1]
@@ -201,13 +216,20 @@ class Tile_Path(object):
         if location == 'upstream': # add hsp to 5' end
             self.start = hsp.query_start # adjust nucleotide coordinates relative to contig
             self.hsps.appendleft(hsp) # append hsp to list of those included at correct end
-            self.nt_seq = self.contig.sequence[self.start-1: hsp.query_end+fill] + self.nt_seq
+            gap = self.contig.sequence[hsp.query_end:hsp.query_end+fill]
+            self.nt_seq = "{}{}{}".format(self.contig.sequence[self.start-1: hsp.query_end],
+                                          self.codon_usage and "X"*len(gap) or gap,
+                                          self.nt_seq)
         elif location == 'downstream': # add hsp to 3' end
             self.end = hsp.query_end
             self.hsps.append(hsp)
-            self.nt_seq = self.nt_seq + self.contig.sequence[hsp.query_start-fill-1: self.end]
+            gap = self.contig.sequence[hsp.query_start-fill-1:hsp.query_start]
+            self.nt_seq = "{}{}{}".format(self.nt_seq,
+                                          self.codon_usage and "X"*len(gap) or gap,
+                                          self.contig.sequence[hsp.query_start: self.end])
         else: # something is wrong, exit here
             raise SystemExit ('Error: Cannot add hsp to tile')
+
         self.aa_seq = translate_sequence(self.nt_seq, self.strand)
         hsp.used = True # mark hsp as used
         self.added = True # something has been incorporated into tile
@@ -230,7 +252,7 @@ class Tile_Path(object):
         if (distance +1) % 3 == 0:
             self.add_hsp(hsp, location, 0-(distance+1))
         else:
-            print >> logfile "Hsp number {} not in same frame as tile - correcting".format(hsp.num)
+            print >> logfile, "Hsp number {} not in same frame as tile - correcting".format(hsp.num)
             while (distance +1) % 3 !=0:
                 distance -= 1
             self.add_hsp(hsp, location, 0-(distance+1))
@@ -250,7 +272,7 @@ class Tile_Path(object):
         distance - distance between hsp and this tile, used as fill value
         """
         difference = distance -1
-        if difference == 1 or difference == 2: # assume incorrect insertion - delete inserted nts
+        if 0 < difference < 3: # assume incorrect insertion - delete inserted nts
             self.add_hsp(hsp, location)
         elif difference % 3 == 0: # assume correct insertion - include nts and translate
             self.add_hsp(hsp, location, difference)
@@ -298,10 +320,126 @@ class Tile_Path(object):
         """
         difference = distance -1
         while difference % 3 != 0: # remove nts until difference is divisible by 3
-            difference = difference -1
+            difference -= 1
         self.add_hsp(hsp, location, difference) # add hsp with the cropped nts and translate
 
         print >> logfile, "Hsp number {} not in same frame as tile - correcting".format(hsp.num)
+
+    def findProteinCoding(self, prokaryotic=False):
+        """Expand corrected nucletode sequence to the first start and stop codons
+        found in teh same frame
+
+        Input:
+        prokaryotic - bool. Use alternate stop codons found in prokaryotic genomes
+        """
+        if not prokaryotic:
+            startCodons = ["ATG"]
+        else:
+            startCodons = ["ATG", "GTG", "TTG"]
+
+        stopCodons = ["TAG", "TAA", "TGA"]
+
+        #Find closest start codon
+        start = self.start
+        while start >= 3 and not self.contig.sequence[start:start+3] in startCodons:
+            start -= 3
+
+        #Make sure that start is actaully a start codon
+        if not self.contig.sequence[start:start+3] in startCodons:
+            start = self.start
+            print >> logfile, "Warning, contig {} has no start codon within frame".format(self.contig.name)
+
+        #Find closest stop codon
+        end = self.end-3
+        while end<=len(self.contig.sequence)-3 and not self.contig.sequence[end:end+3] in stopCodons:
+            end += 3
+
+        #Make sure that stop is actually a stop codon
+        if not self.contig.sequence[end:end+3] in stopCodons:
+            end = self.end-3
+            print >> logfile, "Warning, contig {} has no stop codon within frame".format(self.contig.name)
+
+        return "{}{}{}".format(self.contig.sequence[start:self.start],
+                               self.nt_seq,
+                               self.contig.sequence[self.end:end+3])
+
+    def determineGaps(self):
+        """Replace Xs with a cartesian product of all nucleotides.
+        The length of Xs signifies the length of the gap. The sequence
+        whos 3-mer count most accuraltey resembles the codon usage table
+        is returned
+
+        e.g. AAAAXXXXCCGXXCCX
+
+        Input:
+        seq - String of nucleotide sequence with Xs and gaps to fix
+        url - File-like object, path to file, URL, or id to get codon usage table
+        """
+        #Store the best sequence
+        bestScore = 0
+        bestSequence = None
+
+        print "There are {} combinations to try for {}".format(4**self.nt_seq.count("X"), self.contig.name)
+        print self.nt_seq
+
+        #Create seval terators that return the position of each X
+        xPat = re.compile("X")
+
+        #Try every single combination of nts and see which most closely relates
+        #to the codon usage
+        for i, replacement in enumerate(product("ACGT", repeat=self.nt_seq.count("X"))):
+            xIter = iter(replacement)
+            replSeq = xPat.sub(lambda m:xIter.next(), self.nt_seq)
+
+            #Compare this with the codon usage table
+            kmers, numSeqs = count_kmers(">t\n{}".format(replSeq).split("\n"), IUPAC_N, 3, normalize=True)
+            score = 0
+            for kmer, newCount in kmers.iteritems():
+                originalUsage = self.codon_usage[kmer]
+                score += newCount - originalUsage
+
+            if score < bestScore:
+                bestSequence = replSeq
+
+
+        """Below is another test to add a gap based on codon usage. It first sees if the start
+        is a multiple of three and has the length of a multiple of three. If so, try all possible
+        codons that fit. If the start is not a multiple of 3, it finds the most probable codons 
+        that start with the one or two nucleotides before it. Next is sees if the rest of the gap 
+        until the end is a multiple of three. If not, it is clipped until it is. This sequnce is then
+        tested with all of the best codons. If the end was not a multiple of three, find codons with 
+        one or two nucleotides that follow it. Untested.
+        """
+        if False:
+            for match in re.finditer("X+", self.nt_seq):
+                if match.start() % 3 == 0 and len(match.group(0)) % 3 == 0:
+                    #Match starts in frame and the length can hold at least one codon
+                    for codons in product(self.codon_usage.keys(), repeat=len(match.group(0))/3):
+                        replSeq = "{}{}{}".format(self.nt_seq[:match.start()],
+                                                  "".join(codons),
+                                                  self.nt_seq[match.end():])
+                        #Which is the best?
+                else:
+                    start = match.start()
+                    while start % 3 != 0:
+                        start -= 1
+
+                    startCodons = [codon for codon in self.codon_usage if codon.startswith(self.nt_seq[start:3].replace("X", ""))]
+                    #Which is the best?
+
+                    end = match.end()
+                    while end+1 % 3 != 0:
+                        end -= 1
+
+                    middle = end-(match.start()-start)+1
+                    for codons in product(self.codon_usage.keys(), repeat=middle):
+                        replSeq = "{}{}{}".format(self.nt_seq[:match.start()],
+                                                  "".join(codons),
+                                                  self.nt_seq[match.end():])
+
+                    endCodons = [codon for codon in self.codon_usage if codon.endswith(self.nt_seq[end+1:3].replace("X", ""))]
+
+        self.nt_seq = bestSequence
 
     def printer(self):
         """Writes hsp information to global log File
@@ -366,7 +504,7 @@ def revcomp(dna):
     """returns the reverse complement of a sequence
 
     Input:
-    dna - string containg dna sequence
+    dna - string containing dna sequence
     """
     return dna[::-1].translate(complement_table) 
 
@@ -383,190 +521,261 @@ def sixframe(dna):
     return sixframe
 
 def parse_args():
-	# Parsing command line options
-	parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
-	# name of fasta file 
-	parser.add_argument("-f", "--fasta", 
-	                    required=True, 
-	                    type=argparse.FileType('r'),
-	                    help="Fasta file containing sequences")
-	# name of annotation file (in xml format as code currently stands)
-	parser.add_argument("-a", "--annotation", 
-	                    required=True, 
-	                    type=argparse.FileType('r'),
-	                    help="Blastx xml file containing annotations for sequences")
-	# gap limit
-	parser.add_argument("-g", "--gap_limit", 
-	                    type=int, 
-	                    default=15, 
-	                    help="Cutoff for distance between hsps. If the gap between hsps in nucleotides is greater than this value, the hsp will not be added to the tile.  Default = 15nt")
-	#family/species filter
-	parser.add_argument("--allHits",
-						default=False,
-						help="Use all hits from annotation. Default is to use only the first, high scoring hit. Optional.",
-						action="store_true")
-	parser.add_argument("--filter",
-	                    required=False,
-	                    help="Filter out blastx hits from a given species and fmily name using full scientific names only for now")
-	#Define output
-	parser.add_argument("-o", "--outfile",
-	                    type=argparse.FileType('wt'),
-	                    default="hsp_tiler_output.fa",
-	                    help="File to save corrected sequences")
-	parser.add_argument("-l", "--logfile",
-	                    type=argparse.FileType('wt'),
-	                    default=sys.stdout,
-	                    help="File to save log")
+    """Parsing command line options
+    """
+    parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
+    # name of fasta file 
+    parser.add_argument("-f", "--fasta", 
+                        required=True, 
+                        type=argparse.FileType('r'),
+                        help="Fasta file containing sequences")
+    # name of annotation file (in xml format as code currently stands)
+    parser.add_argument("-a", "--annotation", 
+                        required=True, 
+                        type=argparse.FileType('r'),
+                        help="Blastx xml file containing annotations for sequences")
+    # gap limit
+    parser.add_argument("-g", "--gap_limit", 
+                        type=int, 
+                        default=15, 
+                        help="Cutoff for distance between hsps. If the gap between hsps in nucleotides is greater than this value, the hsp will not be added to the tile.  Default = 15nt")
+    #evlaue cutoff
+    parser.add_argument("-e", "--evalue_cutoff",
+                        type=float,
+                        default=1e-10,
+                        help="Only allow Blast Hist less than or equal to cutoff. Default is 1e-10")
+    #Use every hit for eqch query instead of just the 1st one
+    parser.add_argument("--allHits",
+                        default=False,
+                        help="Use all hits from annotation. Default is to use only the first, high scoring hit. Optional.",
+                        action="store_true")
+    #family/species filter
+    parser.add_argument("--filter",
+                        required=False,
+                        help="Filter out blastx hits from a given species and fmily name using full scientific names only for now")
+    #Use codon usage to fill gaps?
+    codonUsageGroup = parser.add_mutually_exclusive_group()
+    codonUsageGroup.add_argument("--codon_usage",
+                                help="Path to file, URL, or ID of file contaning codon usage")
+    codonUsageGroup.add_argument("--compute_codon",
+                                 default=False,
+                                 action="store_true",
+                                 help="Compute the codon usage table for given fasta sequences")
+    #Define output
+    parser.add_argument("-o", "--outfile",
+                        type=argparse.FileType('wt'),
+                        default=sys.stdout,
+                        help="File to save corrected sequences")
+    parser.add_argument("-l", "--logfile",
+                        type=argparse.FileType('wt'),
+                        default=sys.stderr,
+                        help="File to save log")
 
-	# print help message if no arguments are given
-	if len (sys.argv) == 1:
-		print "here?" 
-		parser.print_help()
-		sys.exit(1)
+    # print help message if no arguments are given
+    if len (sys.argv) == 1:
+        parser.print_help()
+        sys.exit(1)
 
-	#Parse args
-	return parser.parse_args()
+    #Parse args
+    return parser.parse_args()
 
-def run(fasta, annotation, gap_limit, allHits, filter, outfile):
-	#Initilise BLAST parser
-	parser = BlastXMLParser(annotation, allHits=allHits, taxFilter=filter)
+def run(fasta, 
+        annotation, 
+        gap_limit=15, 
+        evalue_cutoff=1e-10, 
+        allHits=False, 
+        filter=None, 
+        codon_usage=None):
+    """Run HSP-Tiler and yield tiles generated for each contig
+    """
 
-	# get list of hsps for highest scoring hit for each contig - go to next contig if no hits
-	for contig, queryID in izip(read_fasta(fasta), parser.parseQuery()):
-	    if not contig.name.strip() == queryID:
-	        raise RuntimeError("BLAST Queries are not in the same order as FASTA file: {}, {}".format(contig.name.strip(), 
-	        																						  queryID))
+    #Initilise BLAST parser
+    parser = BlastXMLParser(annotation, allHits=allHits, evalue=evalue_cutoff, taxFilter=filter)
 
-	    print >> logfile, "\nNext contig:"
-	    print >> logfile, str(contig)
+    # get list of hsps for highest scoring hit for each contig - go to next contig if no hits
+    for contig, queryID in izip(read_fasta(fasta), parser.parseQuery()):
+        if not contig.name.strip() == queryID:
+            raise RuntimeError("BLAST Queries are not in the same order as FASTA file: {}, {}".format(contig.name.strip(),
+                                                                                                      queryID))
 
-	    contig.sixframe = sixframe(contig.sequence)
+        print >> logfile, "\nNext contig:"
+        print >> logfile, str(contig)
 
-	    
-	    #Add each hsp to list
-	    hsp_list = [Hsp(hsp, contig) in parser.parseHsp()]
-	    
-	    if not hsp_list:
-	        print >> logfile, "No hits for {}".format(contig.name)
-	        print >> outfile, str(contig)
-	        continue
-	         
-	    # Initialise tile using highest scoring hsp (first in list) 
-	    tile = Tile_Path (hsp_list[0], contig) 
-	    hsp_list[0].used = True # mark that this hsp has been used
-	    print >> logfile, "Starting tile..."
-	    hsp_list[0].printer()
-	    tile.printer()
+        contig.sixframe = sixframe(contig.sequence)
 
-	    # go to next contig if only one hsp in list
-	    if len(hsp_list) == 1:
-	        print >> logfile, "Only one hsp for this hit.  Tile is complete"
-	        print >> outfile, str(contig)
-	        continue # next contig
 
-	    # if >1 hsp, attempt to create a tile
-	    else: 
-	        # run loop until no hsps were added in the previous iteration
-	        while tile.added == True: 
-	            tile.added = False # loop will exit if this is not set to True by calling add.hsp() in this iteration
+        #Add each hsp to list
+        hsp_list = [Hsp(hsp, contig) for hsp in parser.parseHsp()]
 
-	            # iterate hsps for this contig
-	            for hsp in hsp_list:
+        if not hsp_list:
+            print >> logfile, "No hits for {}".format(contig.name)
+            contig.description += " [GI=None;S=0.0]"
+            yield Tile_Path(None, contig)
+            continue
+             
+        # Initialise tile using highest scoring hsp (first in list) 
+        tile = Tile_Path (hsp_list[0], contig, codon_usage=codon_usage) 
+        hsp_list[0].used = True # mark that this hsp has been used
+        print >> logfile, "Starting tile..."
+        hsp_list[0].printer()
+        tile.printer()
 
-	                # ignore hsps that are already in the tile
-	                if hsp.used == False: 
-	                    logfile.write('\nNext hsp...\n')
-	                    hsp.printer()
+        # go to next contig if only one hsp in list
+        if len(hsp_list) == 1:
+            print >> logfile, "Only one hsp for this hit.  Tile is complete"
+            yield tile
+            continue # next contig
 
-	                    # ignore hsps that are not on the same strand as the tile
-	                    if hsp.strand != tile.strand: 
-	                        print >> logfile, "Hsp number {} is not on the same strand as the tile - cannot tile".format(hsp.num)
-	                        hsp.used = True
-	                        continue # next hsp
+        # if >1 hsp, attempt to create a tile
+        else: 
+            # run loop until no hsps were added in the previous iteration
+            while tile.added == True: 
+                tile.added = False # loop will exit if this is not set to True by calling add.hsp() in this iteration
 
-	                    # ignore hsps that are completely within the tile
-	                    if tile.start <= hsp.query_start and hsp.query_end <= tile.end: 
-	                        print >> logfile, "Hsp {} completely within tile -skipped".format(hsp.num)
-	                        hsp.used = True # mark as used but do not add to tile
-	                        tile.printer()
-	                        continue
+                # iterate hsps for this contig
+                for hsp in hsp_list:
 
-	                    # determine whether incoming hsp is 5' or 3' of tile
-	                    if hsp.query_start <= tile.start: # hsp nt seq 5' of tile
-	                        location = 'upstream'
-	                        distance = abs(hsp.query_end - tile.start)
-	                    elif hsp.query_end >= tile.end: # hsp nt seq 3' of tile
-	                        location = 'downstream'
-	                        distance = abs(hsp.query_start - tile.end)
+                    # ignore hsps that are already in the tile
+                    if hsp.used == False: 
+                        print >> logfile, "\nNext hsp..."
+                        hsp.printer()
 
-	                    # determine whether hsps overlap and add if they do
-	                    if hsp.query_start <= tile.start <= hsp.query_end or hsp.query_start <= tile.end <= hsp.query_end:
-	                        tile.add_overlap(hsp, location, distance) 
+                        # ignore hsps that are not on the same strand as the tile
+                        if hsp.strand != tile.strand: 
+                            print >> logfile, "Hsp number {} is not on the same strand as the tile - cannot tile".format(hsp.num)
+                            hsp.used = True
+                            continue # next hsp
 
-	                    # otherwise they do not overlap
-	                    else: 
+                        # ignore hsps that are completely within the tile
+                        if tile.start <= hsp.query_start and hsp.query_end <= tile.end: 
+                            print >> logfile, "Hsp {} completely within tile - skipped".format(hsp.num)
+                            hsp.used = True # mark as used but do not add to tile
+                            tile.printer()
+                            continue
 
-	                        # check hsp locations make sense before continuing
-	                        if location == 'upstream': 
-	                            assert hsp.query_end < tile.start 
-	                        elif location == 'downstream':
-	                            assert hsp.query_start > tile.end 
+                        # determine whether incoming hsp is 5' or 3' of tile
+                        if hsp.query_start <= tile.start: # hsp nt seq 5' of tile
+                            location = 'upstream'
+                            distance = abs(hsp.query_end - tile.start)
+                        elif hsp.query_end >= tile.end: # hsp nt seq 3' of tile
+                            location = 'downstream'
+                            distance = abs(hsp.query_start - tile.end)
 
-	                        # check if hsp is close enough to tile to incorporate
-	                        if distance > gap_limit: 
-	                            print >> logfile, "Too far away to tile"
-	                        # go to next hsp but do not mark as incorporated as may be able to add in a later iteration    
-	                            continue 
+                        # determine whether hsps overlap and add if they do
+                        if ((hsp.query_start <= tile.start <= hsp.query_end) or 
+                           (hsp.query_start <= tile.end <= hsp.query_end)):
+                            tile.add_overlap(hsp, location, distance) 
 
-	                        # if contig is close enough to attempt tiling                
-	                        else: 
-	                            print >> logfile"Hsp {} is {} nucleotides {} of tile".format(hsp.num), str(distance -1), location)
-	                            assert distance -1 >=0, 'Cannot tile hsps' #sanity check
+                        # otherwise they do not overlap
+                        else: 
 
-								#Check whether the gap between the hsps relative to the HIT is 0.  
-								#If this is true but there is a nucleotide gap relative to the contig, 
-								#something must have been inserted into the contig.  Statement is unwieldy 
-								#because test must be made for every combination of hsps upstream and 
-								#downstream of the tile and on positive and negative strands.
-	                            if (location == 'upstream' and ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0) or (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 ==0))) or (location == 'downstream' and ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 == 0) or (tile.strand == -1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0))): 
-	                                tile.add_insert(hsp, location, distance)
+                            # check hsp locations make sense before continuing
+                            if location == 'upstream': 
+                                assert hsp.query_end < tile.start 
+                            elif location == 'downstream':
+                                assert hsp.query_start > tile.end 
 
-								#If the above is not true, check whether the gap between the hsps 
-								#relative to the hit is > 0.  If this is true and there is no nucleotide 
-								#gap relative to the contig, something must have been deleted from the contig.  
-								#If this is true and there is a nucleotide gap, the nucleotides in that gap 
-								#must have been substituted in the contig. Statement is unwieldy as above
-	                            elif (location == 'upstream' and ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 > 0) or (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 > 0))) or (location == 'downstream' and ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 > 0) or (tile.strand == -1 and tile.hsps[0].hit_end - hsp.hit_start -1 > 0))): 
-	                                tile.add_subst(hsp, location, distance)
-	                           
-								#as we have already dealt with hsps that overlap the tile, if neither 
-								#of the above are true, there is a problem somewhere
-	                            else:
-	                                print >> logfile, "Contig {}: HSP{} could not be tiled".format(contig.name, hsp.num)
-	                                hsp.used = True
-	                                continue
+                            # check if hsp is close enough to tile to incorporate
+                            if distance > gap_limit: 
+                                print >> logfile, "Too far away to tile"
+                                # go to next hsp but do not mark as incorporated as may be able 
+                                # to add in a later iteration    
+                                continue 
 
-	    # add unchanged contig to output if no changes made.  Add tile sequence if changes have been made.
-	    print >> outfile, tile
+                            # if contig is close enough to attempt tiling                
+                            else: 
+                                print >> logfile, "Hsp {} is {} nucleotides {} of tile".format(hsp.num, distance-1, location)
+                                assert distance -1 >=0, 'Cannot tile hsps' #sanity check
+
+                                #Check whether the gap between the hsps relative to the HIT is 0.  
+                                #If this is true but there is a nucleotide gap relative to the contig, 
+                                #something must have been inserted into the contig.  Statement is unwieldy 
+                                #because test must be made for every combination of hsps upstream and 
+                                #downstream of the tile and on positive and negative strands.
+                                if ((location == 'upstream' and 
+                                    ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0) or 
+                                     (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 == 0))) or 
+                                   (location == 'downstream' and 
+                                    ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 == 0) or 
+                                     (tile.strand == -1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0)))): 
+                                    tile.add_insert(hsp, location, distance)
+
+                                #If the above is not true, check whether the gap between the hsps 
+                                #relative to the hit is > 0.  If this is true and there is no nucleotide 
+                                #gap relative to the contig, something must have been deleted from the contig.  
+                                #If this is true and there is a nucleotide gap, the nucleotides in that gap 
+                                #must have been substituted in the contig. Statement is unwieldy as above
+                                elif ((location == 'upstream' and 
+                                      ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 > 0) or 
+                                       (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 > 0))) or 
+                                     (location == 'downstream' and 
+                                      ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 > 0) or 
+                                       (tile.strand == -1 and tile.hsps[0].hit_end - hsp.hit_start -1 > 0)))): 
+                                    tile.add_subst(hsp, location, distance)
+                               
+                                #as we have already dealt with hsps that overlap the tile, if neither 
+                                #of the above are true, there is a problem somewhere
+                                else:
+                                    print >> logfile, "Contig {}: HSP{} could not be tiled".format(contig.name, hsp.num)
+                                    hsp.used = True
+                                    continue
+
+        #Fix gaps if codon usage table supplied
+        if codon_usage and "X" in tile.nt_seq:
+            tile.determineGaps()
+
+        # add unchanged contig to output if no changes made. Add tile sequence if changes have been made.
+        yield tile
 
 #######################################
 #Main
 #######################################
 
 if __name__ == "__main__":
-	#Parse arguments
-	args = parse_args()
+    #Parse arguments
+    args = parse_args()
 
-	logfile = args.logfile
+    #Create two iterators from same file, one for codon usage other for hsp-tiler
+    fasta1, fasta2 = tee(args.fasta)
+    logfile = args.logfile
 
-	#Run hsp_tiler
-	run(args.fasta, 
-		args.annotation, 
-		args.gap_limit, 
-		args.allHits, 
-		args.filter, 
-		args.outfile)
+    #Parse codon usage
+    if args.codon_usage:
+        codon_usage = read_codon_frequencies(args.codon_usage)
+    elif args.compute_codon:
+        codon_usage = count_kmers(fasta1, IUPAC_N, 3, normalize=True)
+    else:
+        codon_usage = None
 
-	#Cleanup
-	logfile.close()
-	args.outfile.close()
+    #Save file info to log
+    print >> logfile, "# hsp_tiler.py output file"
+    print >> logfile, "# Date: {}".format(datetime.now())
+    print >> logfile, "# Fasta: {}".format(args.fasta.name)
+    print >> logfile, "# Annotation: {}".format(args.annotation.name)
+    print >> logfile, "# Outfile: {}".format(args.outfile.name)
+    if args.codon_usage:
+        print >> logfile, "#Codon Usage: {}".format(args.codon_usage)
+    print >> logfile, "# Parameters: gap_limit={}, evalue_cutoff={}, allHits={}, filter=\"{}\"".format(args.gap_limit,
+                                                                                                       args.evalue_cutoff,
+                                                                                                       args.allHits,
+                                                                                                       args.filter)
+
+    #Run hsp_tiler
+    for tile in run(fasta2, 
+                    args.annotation, 
+                    gap_limit=args.gap_limit,
+                    evalue_cutoff=args.evalue_cutoff, 
+                    allHits=args.allHits, 
+                    filter=args.filter,
+                    codon_usage=codon_usage
+                    ):
+        if tile.tile:
+            #Save the protein coding region (tile expanded to closest start and stop codons)
+            print >> args.outfile, tile.findProteinCoding()
+        else:
+            #Save the tiles region
+            print >> args.outfile, tile
+
+    #Cleanup
+    logfile.close()
+    args.outfile.close()

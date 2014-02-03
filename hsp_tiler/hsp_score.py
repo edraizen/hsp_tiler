@@ -1,15 +1,21 @@
+#Major Bug: Script does not account for filters set up by hsp-tiler
+#Fix by using the score that started the tile... 
+
+
 #Standard Libraries
 import sys
 import re
 import argparse
 import csv
-from itertools import izip
+import subprocess
+from itertools import izip, tee
+from collections import defaultdict
 
 #Required Libraries
 from Bio.Blast.Applications import NcbiblastxCommandline
-import prettyplotlib as ppl
-import numpy as np
-from prettyplotlib import plt
+#import prettyplotlib as ppl
+#import numpy as np
+#from prettyplotlib import plt
 
 #Custom imports
 from read_fasta import read_fasta
@@ -18,28 +24,91 @@ from read_codon_usage import read_codon_frequencies
 
 """Score the output from hsp_tiler and optionally create pretty graphics"""
 
-def score_blastx(originalFilename, updatedFilename):
-	"""Compare the blastx bitscores of the original fasta file and hsp-tiler
-	Parameters;
-	originalFilename - filename of original fasta files used to run hsp_tiler
-	updatedFilename - filename of hsp_tiler output
+def get_original_scores(fastaFile, saveGI=False):
+	#Parse out gi number and score from each updated contig
+	seqPattern = re.compile("\[GI\=(.*?)\;S\=(.*?)\]")
+	originalScores = []
+	not_corrected = []
+	giFileName = "{}.GILIST.txt".format(fastaFile)
+	ids = {}
+	with open(fastaFile) as f, open(giFileName, "w") as giFile:
+		for seq in read_fasta(f):
+			seqInfo = seqPattern.match(seq.description)
+			if not seqInfo:
+				raise RuntimeError("Sequnces must contain HSP-Tiler headers.")
+
+			gi = seqInfo.group(1)
+			if saveGI and not gi == "None":
+				print >> giFile, gi 
+			ids[f.name] = gi
+			originalScores.append(float(seqInfo.group(2)))
+
+	if saveGI:
+		return originalScores, giFileName, ids
+	return originalScores, ids
+
+def score_blastx(fastaFile, blastdb, makegilist=False, blastpath=""):
+	"""Calculate updated HSP-Tiler scores. The sequences that were used to 
+	create the tile are used to filter the blast database in order to remove 
+	hits that were filtered during HSP-Tiler.
+
+	Input:
+	fastaFile - path to HSP-Tiler output FASTA
+	blastdb - path to the BLAST db
+	makegilist - bool. Create a new databse filtered by sequenced used to start the tile
+	blastx - path to BLASTX executable
 	"""
-	#Calculate original scores
-	original_scores = get_blastx_scores(originalFilename)
+	
+	if makegilist:
+		if blastpath and not blastpath.endswith("/"):
+			blastpath += "/"
+		newblastdb = "{}.gi.blastdb".format(fastaFile)
+		cmd = "{}blastdb_aliastool -dbtype prot -gilist {} -db {} -out {}".format(blastpath, giFileName, blastdb, newblastdb)
+		process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
+		out, err = process.communicate()
+		blastdb = newblastdb
 
-	#Calculate updated scores
-	updated_scores = get_blastx_scores(updatedFilename)
+	print "Running BLAST"
+	blastFile = "{}.blast.txt".format(fastaFile)
+	blastx_cline = NcbiblastxCommandline(query=fastaFile, db=blastdb, max_target_seqs=10,
+	                                     outfmt=6, num_threads=4, out=blastFile)
+	print >> sys.stderr, "Running BLASTX"
+	stdout, stderr = blastx_cline()
 
-	return original_scores, updated_scores
+	with open(blastFile) as b:
+		updated_scores = read_blastx_bitscores(b)
+
+	return updated_scores
+
+def read_blastx_bitscores(resultsFile, ids):
+	#Process blastx ouput
+	#return [float(field[11]) for field in csv.reader(resultsFile, delimiter="\t")]
+	scores = []
+	previousID = None
+	for field in csv.reader(resultsFile, delimiter="\t"):
+		if field[0] == previousID and field[1] == ids[field[0]]:
+			scores.append(float(field[11]))
+		previousID = field[0]
+	return scores
 
 def write_scores(fasta, original_scores, updated_scores, outfile):
+	"""Write scores to File
+
+	Input:
+	fasta - file-like object containing FASTA sequences
+	original_scores - a list of scores
+	updated_scores - a list of scores
+	"""
 	print >> outfile, "Contig\tOld Score\tNew Score\thsp_tiler_score"
 	for sequence, oldScore, newScore in izip(read_fasta(fasta), original_scores, updated_scores):
-		score = newScore/oldScore
+		if oldScore != 0.0:
+			score = newScore/oldScore
+		else:
+			score = 0.0
 		print >> outfile, "{}\t{}\t{}\t{}".format(sequence.name, oldScore, newScore, score)
 
 def read_scores(score_file):
-	"""Read in a score file written by the write_scores functions. Useful for re running script
+	"""Read in a score file written by the write_scores function. Useful for re running script
 	to edit graphs or view the in iPython notbook
 
 	Parameters:
@@ -56,73 +125,6 @@ def read_scores(score_file):
 		new_scores.append(float(row["New Score"]))
 		scores.append(float(row["hsp_tiler_score"]))
 	return old_scores, new_scores, scores
-
-def markov_score(original, updated, method=0):
-	if method == 0:
-		#Create log probability table
-		counts, num_seqs = count_kmers.count_kmers(original, count_kmers.IUPAC_N, 3)
-	else:
-		#Codon usage for C. elegans
-		counts = read_codon_frequencies(6239)
-
-	#Train 3rd order markov model, based on codons 
-	markov_model = Markov.Markov(kmer_count, 3, count_kmers.IUPAC_N)
-
-    #original_score = markov_model.score(contig.sequence)
-    #original_scores.append(original_score)
-    #print "{} score: {}".format(queryID, original_score)
-
-def lev_distance(s1, s2):
-	"""Copied from ... just to test, if works will correctly cite"""
-	if len(s1) > len(s2):
-		s1,s2 = s2,s1
-	distances = range(len(s1) + 1)
-	for index2,char2 in enumerate(s2):
-		newDistances = [index2+1]
-		for index1,char1 in enumerate(s1):
-			if char1 == char2:
-				newDistances.append(distances[index1])
-			else:
-				newDistances.append(1 + min((distances[index1],
-									distances[index1+1],
-									newDistances[-1])))
-		distances = newDistances
-	return distances[-1]
-
-	
-
-def get_blastx_score(seq):
-	#Save contig to be used by blastx
-	blastx_seq = open("blastx_seq.fa", "w+")
-	blastx_seq.write(str(seq))
-	blastx_seq.close()
-
-	#Run blastx
-	cmd = "{} -db {} -query blastx_seq.fa -max_target_seqs 1 -outfmt '6 bitscore'".format(blastx, blastdb)
-	process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
-	out, err = process.communicate()
-
-	#Cleanup
-	os.remove("blastx_seq.fa")
-
-	return int(out.strip())
-
-def get_blastx_scores(fastaFile):
-	blastFile = "{}.blast.txt".format(fastaFile)
-	print >> sys.stderr, blastFile
-	try:
-		blastFile = open(blastFile)
-	except:
-		blastx_cline = NcbiblastxCommandline(query=fastaFile, db=blastdb, max_target_seqs=1,
-	                                         outfmt=6, num_threads=11, out=blastFile)
-		stdout, stderr = blastx_cline()
-		blastFile = open(blastFile)
-
-	import csv
-	scores = [float(field[11]) for field in csv.reader(blastFile, delimiter="\t")]
-	#{field[0]: float(field[11]) for field in csv.reader(blastFile, delimiter="\t")}
-
-	return scores
    
 def scatter(original, updated, xlab=None, ylab=None, main=None):
 	fig, ax = plt.subplots()
@@ -132,52 +134,101 @@ def scatter(original, updated, xlab=None, ylab=None, main=None):
 	ppl.scatter(ax, original, updated)
 	plt.show()
 
-def histogram(original, updated):
+def histogram(original, updated, bins=None):
+	"""Plot a histogram of score improvements (updated-origianl)
+
+	Input:
+	original - list of original scores
+	updated - list of updates scores in same order as original
+	bins - number of bins to represent improvements
+	"""
+	import numpy as np
+	#Lengths of score lists must be identical, assume in same order
+	assert len(original) == len(original)
+
+	#Set up bins:
+	if bins is None or bins != 0:
+		imoprovements = {(-1,-1):0}
+		for i in range(0, len(original), bins):
+			improvements[(0,i+bins)] = 0
+	else:
+		improvements = {(-1,-1):0, (-5,0):0, (0,1):0, (1,25):0, (25,50):0, (50,75):0, (75,100):0, (100,125):0, (125,150):0, (150,200):0, (200,300):0, (300,400):0, (500,10000):0} #defaultdict(int)
+	
+	#Calcualte improvements
+	for o, u in izip(original, updated):
+		if o>u: 
+			improvements[(-1,-1)] += 1
+			continue
+		for lower, upper in improvements:
+			if lower <= int(u-o) < upper:
+				improvements[(lower,upper)] += 1
+				break
+	keys = sorted(improvements.keys(), key=lambda x:x[0])
+	values = [improvements[r] for r in keys]
+
 	fig, ax = plt.subplots()
+	#ppl.hist(ax, improvements.values())
 
-	ohist, obins = np.histogram(original, bins=50)
-	width = 0.7*(obins[1]-obins[0])
-	center = (obins[:-1]+obins[1:])/2
-	ppl.bar(ax, center, ohist, align='center', width=width)
-
-	uhist, ubins = np.histogram(updated, bins=50)
-	width = 0.7*(ubins[1]-ubins[0])
-	center = (ubins[:-1]+ubins[1:])/2
-	ppl.bar(ax, center, uhist, color='r', align='center', width=width)
+	width = 1.0
+	ax.set_xticks(np.arange(len(improvements)))
+	ax.set_xticklabels([l for l, u in keys])
+	ppl.bar(ax, np.arange(len(improvements)), values, align='center', width=width, log=True)
 
 	plt.show()
 
 def parse_args():
-	parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
-	# name of fasta file 
-	parser.add_argument("-o", "--original", 
-	                    required=True, 
-	                    type=argparse.FileType('r'),
-	                    help="Fasta file containing sequences")
-	# name of blast output in tab delimated (standard)
-	parser.add_argument("-u", "--updated", 
-	                    required=True, 
+	parser = argparse.ArgumentParser(description="Score HSP-Tiler output FASTA files")
+	parser.add_argument("-f", "--fasta", 
+	                    required=True,
 	                    type=argparse.FileType('r'),
 	                    help="Blastx xml file containing annotations for sequences")
-	#blast for evalue comparison
-	parser.add_argument("-b", "--blastdb",
+	
+	subparsers = parser.add_subparsers(help='Run BLAST, load BLAST RESULTS, or load score file')
+
+	# Run BLASTX
+	runblast = subparsers.add_parser('run', help='Run/preprocess BLAST')
+	runblast.add_argument("-b", "--blastdb",
 	                    required=True,
-	                    help="Location of blast db to caluate evalue changes")
-	parser.add_argument("--blastx",
+	                    help="Location of blast db to calcuate evalue changes")
+	runblast.add_argument("--blastpath",
 	                    required=False,
-	                    default="blastx",
-	                    help="Location of blastx executible, if not in users PATH")
+	                    default="",
+	                    help="Location of blast executibles, if not in user's PATH")
+	runblast.add_argument("-g", "--makegilist",
+	                    required=False,
+	                    action="store_true",
+	                    help="Score sequenes from filtered blastdb based on gi number")
+
+
+	# Read BLASTX reults
+	readblast = subparsers.add_parser('results', help='Read BLASTX results')
+	readblast.add_argument("-r", "--results",
+					       type=argparse.FileType('r'),
+					       help="BLAST output file with updated scores")
+
 	#Define output
-	parser.add_argument("-s", "--outfile",
+	parser.add_argument("-o", "--outfile",
 	                    type=argparse.FileType('wt'),
 	                    default=sys.stdout,
 	                    help="File to save corrected sequences")
 	return parser.parse_args()
 
 if __name__ == "__main__":
+	#Parse arguments
 	args = parse_args()
-	blastdb = args.blastdb
-	blastx = args.blastx
-	original_scores, updated_scores = score_blastx(args.original.name, args.updated.name)
-	write_scores(args.updated, original_scores, updated_scores, args.outfile)
-	scatter(original_scores, updated_scores)
+
+	if hasattr(args, "results"):
+		original_scores, ids = get_original_scores(args.fasta.name)
+		updated_scores = read_blastx_bitscores(args.results, ids)
+	elif hasattr(args, "run") and args.makegilist:
+		original_scores, giFileName = get_original_scores(fastaFile, saveGI=True)
+		updated_scores = score_blastx(args.fasta.name, args.blastdb, makegilist=giFileName, blastpath=args.blastpath)
+	else:
+		original_scores, ids = get_original_scores(args.fasta.name)
+		updated_scores = read_blastx_bitscores(args.fasta.name, ids)
+
+	#Save scores
+	write_scores(args.fasta, original_scores, updated_scores, args.outfile)
+
+	#Plot
+	#scatter(original_scores, updated_scores)
