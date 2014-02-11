@@ -20,6 +20,12 @@ from count_kmers import count_kmers, IUPAC_N
 from read_codon_usage import read_codon_frequencies
 
 #######################################
+#Global Variables
+#######################################
+
+logfile = sys.stderr
+
+#######################################
 #Classes
 #######################################
 
@@ -188,7 +194,7 @@ class Tile_Path(object):
         else:
             seq = self.contig.sequence
 
-        tmp = ">{} {}\n".format(self.contig.name, self.description)
+        tmp = ">{}_{} {}\n".format(self.contig.name, self.start, self.description)
         for i in range(0, len(seq), 60):
             tmp += "{}\n".format(seq[i:i+60])
         return tmp[:-1]
@@ -325,11 +331,13 @@ class Tile_Path(object):
 
         print >> logfile, "Hsp number {} not in same frame as tile - correcting".format(hsp.num)
 
-    def findProteinCoding(self, prokaryotic=False):
+    def extendReadingFrame(self, conservative=False, prokaryotic=False):
         """Expand corrected nucletode sequence to the first start and stop codons
         found in teh same frame
 
         Input:
+        conservative - bool. Only find first start codon, do not exand to the next 
+                       stop farther upstream.
         prokaryotic - bool. Use alternate stop codons found in prokaryotic genomes
         """
         if not prokaryotic:
@@ -339,13 +347,15 @@ class Tile_Path(object):
 
         stopCodons = ["TAG", "TAA", "TGA"]
 
-        #Find closest start codon
+        #Expand upstream to nearest stop codon (if not conserved) of nearest start codon
+        #if conservative.
+        codons = startCodons if conservative else stopCodons
         start = self.start
-        while start >= 3 and not self.contig.sequence[start:start+3] in startCodons:
+        while start >= 3 and not self.contig.sequence[start:start+3] in codons:
             start -= 3
 
-        #Make sure that start is actaully a start codon
-        if not self.contig.sequence[start:start+3] in startCodons:
+        #Make sure that start is actaully a start or stop codon
+        if not self.contig.sequence[start:start+3] in codons:
             start = self.start
             print >> logfile, "Warning, contig {} has no start codon within frame".format(self.contig.name)
 
@@ -359,9 +369,13 @@ class Tile_Path(object):
             end = self.end-3
             print >> logfile, "Warning, contig {} has no stop codon within frame".format(self.contig.name)
 
-        return "{}{}{}".format(self.contig.sequence[start:self.start],
-                               self.nt_seq,
-                               self.contig.sequence[self.end:end+3])
+        self.start = start
+        self.end = end+3
+
+        self.nt_seq = "{}{}{}".format(self.contig.sequence[start:self.start],
+                                      self.nt_seq,
+                                      self.contig.sequence[self.end:end+3])
+        self.aa_seq = self.aa_seq = translate_sequence(self.nt_seq, self.strand)
 
     def determineGaps(self):
         """Replace Xs with a cartesian product of all nucleotides.
@@ -448,6 +462,13 @@ class Tile_Path(object):
         print >> logfile, "Start: {}, End: {}".format(self.start, self.end)
         print >> logfile, "Protein: {}".format(self.aa_seq)
 
+class EmptyTilePath(Tile_Path):
+    def __init__(self, contig):
+        self.contig = contig
+        self.tile = False
+        self.description = "[GI={};S={}]".format(None, 0.0)
+        self.start = 0
+
 #######################################
 #Global functions
 #######################################
@@ -520,7 +541,7 @@ def sixframe(dna):
         sixframe [0-i-1] = protein
     return sixframe
 
-def parse_args():
+def parse_args(args):
     """Parsing command line options
     """
     parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
@@ -571,13 +592,16 @@ def parse_args():
                         default=sys.stderr,
                         help="File to save log")
 
+    if args[0] == __file__:
+        args = args[1:]
+
     # print help message if no arguments are given
-    if len (sys.argv) == 1:
+    if len(args) == 0:
         parser.print_help()
         sys.exit(1)
 
     #Parse args
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 def run(fasta, 
         annotation, 
@@ -585,7 +609,8 @@ def run(fasta,
         evalue_cutoff=1e-10, 
         allHits=False, 
         filter=None, 
-        codon_usage=None):
+        codon_usage=None,
+        ):
     """Run HSP-Tiler and yield tiles generated for each contig
     """
 
@@ -610,7 +635,7 @@ def run(fasta,
         if not hsp_list:
             print >> logfile, "No hits for {}".format(contig.name)
             contig.description += " [GI=None;S=0.0]"
-            yield Tile_Path(None, contig)
+            yield EmptyTilePath(contig)
             continue
              
         # Initialise tile using highest scoring hsp (first in list) 
@@ -731,12 +756,14 @@ def run(fasta,
 #Main
 #######################################
 
-if __name__ == "__main__":
+def main(args):
     #Parse arguments
-    args = parse_args()
+    args = parse_args(args)
 
     #Create two iterators from same file, one for codon usage other for hsp-tiler
     fasta1, fasta2 = tee(args.fasta)
+
+    global logfile
     logfile = args.logfile
 
     #Parse codon usage
@@ -771,11 +798,14 @@ if __name__ == "__main__":
                     ):
         if tile.tile:
             #Save the protein coding region (tile expanded to closest start and stop codons)
-            print >> args.outfile, tile.findProteinCoding()
-        else:
-            #Save the tiles region
-            print >> args.outfile, tile
+            tile.extendReadingFrame()
+        
+        #Save the tiles region
+        print >> args.outfile, tile
 
     #Cleanup
     logfile.close()
     args.outfile.close()
+
+if __name__ == "__main__":
+    main(sys.argv)
