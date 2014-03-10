@@ -28,21 +28,23 @@ def get_original_scores(fastaFile):
 	seqPattern = re.compile("\[GI\=(.*?)\;S\=(.*?)\]")
 	originalScores = []
 	not_corrected = []
-	giFileName = "{}.GILIST.txt".format(fastaFile)
 	ids = {}
 	for seq in read_fasta(fastaFile):
 		seqInfo = seqPattern.match(seq.description)
 		if not seqInfo:
 			raise RuntimeError("Sequnces must contain HSP-Tiler headers.")
 
+		contig = seq.name #.split("_")[0]
 		gi = seqInfo.group(1)
-		ids[seq.name.split("_")[0]] = gi
+		score = float(seqInfo.group(2))
+		yield contig, gi, score 
+		#ids[seq.name.split("_")[0]] = gi
 
-		originalScores.append(float(seqInfo.group(2)))
+		#originalScores.append()
 
-	return originalScores, ids
+	#return izip(ids.keys(), ids.values(), originalScores) 
 
-def score_blastx(fastaFile, blastdb, ids, num_threads=4, blastpath=""):
+def run_blastx(fastaFile, blastdb, num_threads=3, blastpath=""):
 	"""Calculate updated HSP-Tiler scores. The sequences that were used to 
 	create the tile are used to filter the blast database in order to remove 
 	hits that were filtered during HSP-Tiler.
@@ -62,10 +64,11 @@ def score_blastx(fastaFile, blastdb, ids, num_threads=4, blastpath=""):
 	if not hasBLAST:
 		if blastpath and not blastpath.endswith("/"):
 			blastpath += "/"
-		cmd = "{}blastx -query {} -db {} -max_target_seqs 10 -outfmt 6 -out {}".format(blastpath, 
-			                                                                           fastaFile, 
-			                                                                           blastdb,
-			                                                                           blastFile)
+		cmd = "{}blastx -query {} -db {} -max_target_seqs 10 -outfmt 6 -out {} -num_threads {}".format(blastpath, 
+			                                                                                           fastaFile, 
+			                                                                           				   blastdb,
+			                                                                           				   blastFile,
+			                                                                           				   num_threads)
 		process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
 		out, err = process.communicate()
 
@@ -76,12 +79,66 @@ def score_blastx(fastaFile, blastdb, ids, num_threads=4, blastpath=""):
 		print >> sys.stderr, "Running BLASTX"
 		stdout, stderr = blastx_cline()
 
-	with open(blastFile) as b:
-		updated_scores = read_blastx_bitscores(b, idss)
+	return open(blastFile)
 
-	return updated_scores
+def compare(results, original_scores):
+	for originalContig, originalGI, originalScore in original_scores:
+		try:
+			score = max(s for (contig, gi), s in results if contig==originalContig)
+		except:
+			print "No score for {}, with original score of {}".format(originalContig, originalScore)
+			score = originalScore
+		yield originalContig, originalScore, score
 
-def read_blastx_bitscores(resultsFile, ids):
+	"""
+	updatedScores = resultsFile
+	updatedContig, updatedGI, updatedScore = next(updatedScores)
+	originalContig, originalGI, originalScore = next(original_scores)
+	done = False
+	while not done:
+		print "originalContig={}, originalGI={}, originalScore={}".format(originalContig, originalGI, originalScore)
+		print "updatedContig={}, updatedGI={}, updatedScore={}".format(updatedContig, updatedGI, updatedScore)
+		if originalScore == 0.0:
+			#Was not found in the database before or after
+			yield originalContig, 0.0, 0.0
+			try:
+				originalContig, originalGI, originalScore = next(original_scores)
+			except StopIteration:
+				done = True
+			print "next original"
+		else:
+			if originalContig == updatedContig:
+				if originalGI == updatedGI:
+					yield updatedContig, originalScore, updatedScore
+
+					while originalContig == updatedContig:
+						try:
+							updatedContig, updatedGI, updatedScore = next(updatedScores)
+						except StopIteration:
+							done = True
+						print "next updated", updatedContig
+
+					try:
+						originalContig, originalGI, originalScore = next(original_scores)
+					except StopIteration:
+						done = True
+					print "next original"
+
+					
+				else:
+					try:
+						updatedContig, updatedGI, updatedScore = next(updatedScores)
+					except StopIteration:
+						done = True
+					print "next updated", updatedContig
+			else:
+				try:
+					updatedContig, updatedGI, updatedScore = next(updatedScores)
+				except StopIteration:
+					done = True
+				print "next updated", updatedContig"""
+
+def read_blastx_bitscores(resultsFile):
 	"""Process blastx tab delimeted output. Only saves best hit for each query
 	and only save queries who are in the the list of ids
 
@@ -91,17 +148,16 @@ def read_blastx_bitscores(resultsFile, ids):
 
 	Output:
 	-scores, list of bitsocres for each hit
-	""" 
-	scores = []
-	previousID = ""
+	"""
+	results = {}
 	for field in csv.reader(resultsFile, delimiter="\t"):
-		contig = field[0].split("_")[0]
-		if not field[0] == previousID and field[1].split("|")[1] == ids[contig]:
-			scores.append(float(field[11]))
-			previousID = field[0]
-	return scores
+		contig = field[0] #.split("_")[0]
+		gi = field[1].split("|")[1]
+		updatedScore = float(field[11])
+		results[(contig, gi)] = updatedScore
+	return results
 
-def write_scores(fasta, original_scores, updated_scores, outfile):
+def write_scores(updated_scores, outfile):
 	"""Write scores to File
 
 	Input:
@@ -110,12 +166,14 @@ def write_scores(fasta, original_scores, updated_scores, outfile):
 	updated_scores - a list of scores
 	"""
 	print >> outfile, "Contig\tOld Score\tNew Score\thsp_tiler_score"
-	for sequence, oldScore, newScore in izip(read_fasta(fasta), original_scores, updated_scores):
-		if oldScore != 0.0:
-			score = newScore/oldScore
+	#for sequence, oldScore, newScore in izip(read_fasta(fasta), original_scores, updated_scores):
+	for contig, originalScore, updatedScore in updated_scores:
+		print "Writing", contig, originalScore, updatedScore 
+		if originalScore != 0.0:
+			score = originalScore/updatedScore
 		else:
 			score = 0.0
-		print >> outfile, "{}\t{}\t{}\t{}".format(sequence.name, oldScore, newScore, score)
+		print >> outfile, "{}\t{}\t{}\t{}".format(contig, originalScore, updatedScore, score)
 
 def read_scores(score_file):
 	"""Read in a score file written by the write_scores function. Useful for re running script
@@ -167,14 +225,18 @@ if __name__ == "__main__":
 	fasta1, fasta2 = tee(args.fasta)
 
 	#Score
-	original_scores, ids = get_original_scores(fasta1)
+	original_scores = get_original_scores(fasta1)
 
 	if args.blastdb is not None:
-		updated_scores = score_blastx(args.fasta.name, args.blastdb, ids, blastpath=args.blastpath)
-	if args.results is not None:
-		updated_scores = read_blastx_bitscores(args.results, ids)
+		blastFile = run_blastx(args.fasta.name, args.blastdb, blastpath=args.blastpath)
+		updated_scores = read_blastx_bitscores(blastFile)
+	elif args.results is not None:
+		print "Here", args.results
+		updated_scores = read_blastx_bitscores(args.results)
 	else:
 		raise RuntimeError("Must run BLASTX (--blastdb) or read in a BLASTX file (--results)")	
 
+	#Compare scores
+	scores = compare(updated_scores, original_scores)
 	#Save scores
-	write_scores(fasta2, original_scores, updated_scores, args.outfile)
+	write_scores(scores, args.outfile)

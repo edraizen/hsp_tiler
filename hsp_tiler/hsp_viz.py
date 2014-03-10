@@ -12,9 +12,10 @@ import math
 #Import other libraries
 import prettyplotlib as ppl
 import numpy as np
-from prettyplotlib import plt, set2, almost_black
+from prettyplotlib import plt
 import matplotlib as mpl
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
+from prettyplotlib import brewer2mpl
 
 #Import custum libraries
 from hsp_score import read_scores
@@ -23,124 +24,129 @@ from hsp_score import read_scores
 and histograms"""
 
 def analyze(original, updated, scatterName=None, histName=None):
-	"""plot both scatterplot and histogram"""
-	scatter(original, updated, save=scatterName)
-	histogram(original, updated, save=histName)
+    """plot both scatterplot and histogram"""
+    scatter(original, updated, save=scatterName)
+    histogram(original, updated, save=histName)
 
 
    
 def scatter(original, updated, main="", save=None):
-	"""Plot a scatterplot of updated bitscores vs. original bitscores
+    """Plot a scatterplot of updated bitscores vs. original bitscores
 
-	""" 
-	#Remove hits with no improvement and calcate the number of hits with no
-	#improvement(udated == original), positive imporvent (updated > original), 
-	#and negative improvment (updated < original)
-	positiveImprovement = []
-	negativeImprovement = []
-	noImprovement = 0
-	for o, u in izip(original, updated):
-		if u > o:
-			positiveImprovement.append((o,u))
-		elif u < o:
-			negativeImprovement.append((o,u))
-		else:
-			noImprovement +=1
+    """ 
+    #Remove hits with no improvement and calcate the number of hits with no
+    #improvement(udated == original), positive imporvent (updated > original), 
+    #and negative improvment (updated < original)
+    print len(original)
+    positiveImprovement = []
+    negativeImprovement = []
+    noImprovement = 0
+    for o, u in izip(original, updated):
+        if int(o) == int(u):
+            noImprovement +=1
+        elif u > o:
+            positiveImprovement.append((o,u))
+        elif u < o:
+            negativeImprovement.append((o,u))
+        else:
+            noImprovement +=1
 
-	if not positiveImprovement:
-		positiveImprovement = [()]
-	if not negativeImprovement:
-		negativeImprovement = [()]
+    if not positiveImprovement:
+        positiveImprovement = [()]
+    if not negativeImprovement:
+        negativeImprovement = [()]
 
+    print positiveImprovement
+    print negativeImprovement
+    print noImprovement
 
-	#Set deimensions
-	x, y = zip(*positiveImprovement+negativeImprovement)
-	xMax = int(round(sorted(x)[-1]/500.0)*500.0)
-	yMax = int(round(sorted(y)[-1]/500.0)*500.0)
-	sep = 500
-	xticks = range(0, xMax, sep)
-	yticks = range(0,yMax,sep)
+    #Set deimensions
+    x, y = zip(*positiveImprovement+negativeImprovement)
+    xMax = int(round(sorted(x)[-1]/500.0)*500.0)
+    yMax = int(round(sorted(y)[-1]/500.0)*500.0)
+    sep = 500
+    xticks = range(0, xMax, sep)
+    yticks = range(0,yMax,sep)
 
-	fig, ax = plt.subplots()
-	ax.set_title(main)
-	ax.set_xlabel("Original Bitscores")
-	ax.set_ylabel("Updated Bitscores")
+    fig, ax = plt.subplots()
+    ax.set_title(main)
+    ax.set_xlabel("Original Bitscores")
+    ax.set_ylabel("Updated Bitscores")
 
-	
-	#Plot postive improvement (green, automatically by prettyplotlib)
-	if positiveImprovement:
-		ppl.scatter(ax, *zip(*positiveImprovement), 
-		        	label="Positive Improvement ({} seqs)".format(len(positiveImprovement)))
+    
+    #Plot postive improvement (green, automatically by prettyplotlib)
+    if positiveImprovement:
+        ppl.scatter(ax, *zip(*positiveImprovement), 
+                    label="Positive Improvement ({} seqs)".format(len(positiveImprovement)))
 
     #Draw no improvement line
-	ppl.plot(ax, (0,xMax), (0,yMax), color='k', linestyle='-', linewidth=2,
-		     label="No Improvement ({} seqs)".format(noImprovement))
+    ppl.plot(ax, (0,xMax), (0,xMax), color='k', linestyle='-', linewidth=2,
+             label="No Improvement ({} seqs)".format(noImprovement))
 
-	#Plot negative improvement (red, automatically by prettyplotlib)
-	if negativeImprovement:
-		ppl.scatter(ax, *zip(*negativeImprovement),
-		        	label="Negative Improvement ({} seqs)".format(len(negativeImprovement)))
+    #Plot negative improvement (red, automatically by prettyplotlib)
+    if negativeImprovement:
+        ppl.scatter(ax, *zip(*negativeImprovement),
+                    label="Negative Improvement ({} seqs)".format(len(negativeImprovement)))
 
-	#Draw labels
-	ppl.legend(ax)
+    #Draw labels
+    ppl.legend(ax)
 
-	#Set axis
-	ax.set_ylim([0,yMax])
-	ax.set_xlim([0,xMax])
+    #Set axis
+    ax.set_ylim([0,yMax])
+    ax.set_xlim([0,xMax])
 
-	if save is None:
-		plt.show()
-	else:
-		plt.savefig(save)
+    if save is None:
+        plt.show()
+    else:
+        plt.savefig(save)
 
 def histogram(original, updated, bins=None, main="", save=None):
-	"""Plot a histogram of score improvements (updated-origianl)
+    """Plot a histogram of score improvements (updated-origianl)
 
-	Input:
-	original - list of original scores
-	updated - list of updates scores in same order as original
-	bins - number of bins to represent improvements
-	"""
-	#Lengths of score lists must be identical, assume in same order
-	assert len(original) == len(original)
+    Input:
+    original - list of original scores
+    updated - list of updates scores in same order as original
+    bins - number of bins to represent improvements
+    """
+    #Lengths of score lists must be identical, assume in same order
+    assert len(original) == len(original)
 
-	#Set up bins:
-	if bins is not None and bins > 0:
-		imoprovements = {(-1,-1):0}
-		for i in range(0, len(original), bins):
-			improvements[(0,i+bins)] = 0
-	else:
-		improvements = {(-1,-1):0, (-5,0):0, (0,1):0, (1,25):0, (25,50):0, (50,75):0, (75,100):0, (100,125):0, (125,150):0, (150,200):0, (200,300):0, (300,400):0, (500,10000):0} #defaultdict(int)
-	
-	#Calcualte improvements
-	for o, u in izip(original, updated):
-		if o>u: 
-			improvements[(-1,-1)] += 1
-			continue
-		for lower, upper in improvements:
-			if lower <= int(u-o) < upper:
-				improvements[(lower,upper)] += 1
-				break
-	keys = sorted(improvements.keys(), key=lambda x:x[0])
-	keys[0] = ""
-	values = [improvements[r] for r in keys]
+    #Set up bins:
+    if bins is not None and bins > 0:
+        imoprovements = {(-1,-1):0}
+        for i in xrange(0, len(original), bins):
+            improvements[(0,i+bins)] = 0
+    else:
+        improvements = {(-1,-1):0, (-5,0):0, (0,1):0, (1,25):0, (25,50):0, (50,75):0, (75,100):0, (100,125):0, (125,150):0, (150,200):0, (200,300):0, (300,400):0, (500,10000):0} #defaultdict(int)
+    
+    #Calcualte improvements
+    for o, u in izip(original, updated):
+        if o>u: 
+            improvements[(-1,-1)] += 1
+            continue
+        for lower, upper in improvements:
+            if lower <= int(u-o) < upper:
+                improvements[(lower,upper)] += 1
+                break
+    keys = sorted(improvements.keys(), key=lambda x:x[0])
+    values = [improvements[r] for r in keys]
 
-	fig, ax = plt.subplots()
-	ax.set_title(main)
-	ax.set_xlabel("Improvement (updated-original) bitscores")
-	ax.set_ylabel("Frequency")
-	#ax.set_yscale('log')
+    fig, ax = plt.subplots()
+    ax.set_title(main)
+    ax.set_xlabel("Improvement (updated-original) bitscores")
+    ax.set_ylabel("log(Frequency)")
+    #ax.set_yscale('log')
 
-	width = 1.0
-	#ax.set_xticks(np.arange(len(improvements)))
-	#ax.set_xticklabels([l for l, u in keys])
-	bar(ax, np.arange(len(improvements)), values, log=True,
-		annotate=True, grid='y', xticklabels=[l for l, u in keys])
+    width = 1.0
+    #ax.set_xticks(np.arange(len(improvements)))
+    #ax.set_xticklabels([l for l, u in keys])
+    bar(ax, np.arange(len(improvements)), values, log=True,
+        annotate=True, grid='y', xticklabels=[l for l, u in keys])
 
-	if save is None:
-		plt.show()
-	else:
-		plt.savefig(save)
+    if save is None:
+        plt.show()
+    else:
+        plt.savefig(save)
 
 def bar(*args, **kwargs):
     """
@@ -168,7 +174,9 @@ def bar(*args, **kwargs):
     .org/api/axes_api.html#matplotlib.axes.Axes.bar is accepted.
     """
     ax, args, kwargs = maybe_get_ax(*args, **kwargs)
-    kwargs.setdefault('color', set2[0])
+    color_cycle = brewer2mpl.get_map('Set2', 'qualitative', 8).mpl_colors
+    almost_black = '#262626'
+    kwargs.setdefault('color', color_cycle[0])
     kwargs.setdefault('edgecolor', 'white')
     middle = 0.4 if 'width' not in kwargs else kwargs['width']/2.0
 
@@ -392,30 +400,30 @@ def remove_chartjunk(ax, spines, grid=None, ticklabels=None, show_ticks=False):
                 ax.set_yticklabels([])
 
 def parse_args():
-	parser = argparse.ArgumentParser(description="Visualize HSP-Tiler output")
-	parser.add_argument("-s", "--scores",
-					       type=argparse.FileType('r'),
-					       help="BLAST output file with updated scores")
-	#Define output
-	parser.add_argument("--scatterplot",
-						required=False,
-						default=None,
-	                    help="File to save scatterplot sequences")
-	parser.add_argument("--histogram",
-						required=False,
-						default=None,
-	                    help="File to save scatterplot sequences")
-	return parser.parse_args()
+    parser = argparse.ArgumentParser(description="Visualize HSP-Tiler output")
+    parser.add_argument("-s", "--scores",
+                           type=argparse.FileType('r'),
+                           help="BLAST output file with updated scores")
+    #Define output
+    parser.add_argument("--scatterplot",
+                        required=False,
+                        default=None,
+                        help="File to save scatterplot sequences")
+    parser.add_argument("--histogram",
+                        required=False,
+                        default=None,
+                        help="File to save scatterplot sequences")
+    return parser.parse_args()
 
 if __name__ == "__main__":
-	#Parse arguments
-	args = parse_args()
+    #Parse arguments
+    args = parse_args()
 
-	print args
+    print args
 
-	original_scores, updated_scores, scores = read_scores(args.scores)
+    original_scores, updated_scores, scores = read_scores(args.scores)
 
-	analyze(original_scores, updated_scores, scatterName=args.scatterplot, histName=args.histogram)
+    analyze(original_scores, updated_scores, scatterName=args.scatterplot, histName=args.histogram)
 
 
 

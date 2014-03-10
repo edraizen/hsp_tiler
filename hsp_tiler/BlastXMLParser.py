@@ -2,6 +2,10 @@ import sys
 import xml.etree.cElementTree as ET
 import re
 
+regexTaxFilters = {0:re.compile("^.+\[(.+)\]"),  #nr
+                   2:re.compile("OS=(\w+\s\s+)") #uniprot
+                  }
+
 class BlastXMLParser(object):
 	"""Parses BLAST XML files and easily separates Iterations, Hits, and HSPs without 
 	loading all of the data into memory. Also can filter results by evalue or
@@ -9,7 +13,7 @@ class BlastXMLParser(object):
 
 	Reinventing the wheel. Biopython may be more robust, but this does the job.
 	"""
-	def __init__(self, blast, allHits=False, evalue=1e-10, taxFilter=None):
+	def __init__(self, blast, allHits=False, evalue=1e-10, taxFilter=None, taxFilterType=0):
 		"""Intialise a BLAST XML parser. 
 
 		Parameters:
@@ -43,6 +47,13 @@ class BlastXMLParser(object):
 		for event, elem in self.context:
 			if event == "start" and elem.tag == "Iteration":
 				break
+
+		if taxFilter:
+			if not taxFilterType in regexTaxFilters:
+				self.taxFilterType = re.compile(taxFilterType)
+			else:
+				self.taxFilterType = regexTaxFilters[taxFilterType]
+
 
 	def parseQuery(self):
 		"""Parse each query (i.e. Iteration and Hits), but only use first hit unless allHits is specified
@@ -88,7 +99,7 @@ class BlastXMLParser(object):
 				if self.taxFilter:
 					try:
 						#Parse out genus and species if exists
-						taxInfo = re.findall("^.+\[(.+)\]", elem.text)[0]
+						taxInfo = self.taxFilterType.findall(elem.text)[0]
 						if len(taxInfo.split()) == 1: 
 							#Error finding taxonomic info
 							taxInfo = elem.text
