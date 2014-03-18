@@ -87,7 +87,11 @@ class BlastXMLParser(object):
 
 		for event, elem in self.context:
 			if event == "end" and elem.tag == "Hit_id":
-				hitID = elem.text.split("|")[1] #field is 'gi|XXXXX|ref|abcd', save XXXX
+				try:
+					#Assume NCBI headers
+					hitID = elem.text.split("|")[1] #field is 'gi|XXXXX|ref|abcd', save XXXX
+				except:
+					hitID = elem.text #just use the whole hit id
 			elif event == "end" and elem.tag == "Hit_def":
 				#Get species and genus for use with filter
 

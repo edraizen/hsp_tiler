@@ -1,4 +1,7 @@
 #!/usr/local/bin/python
+# Author: Eli Draizen, Kathryn Crouch
+# Date: 16-3-2014
+# File: hsp_tiler.py
 
 #######################################
 #Imports
@@ -6,7 +9,7 @@
 
 #Standard Libraries
 import argparse
-import os, sys
+import sys
 import re
 import string
 from collections import deque
@@ -25,11 +28,13 @@ from read_codon_usage import read_codon_frequencies
 
 logfile = sys.stderr
 
+UPSTREAM = 0
+DOWNSTREAM = 1
+
 #######################################
 #Classes
 #######################################
 
-#HSPs
 class Hsp(object):
     """Holds information about a given High-scoring
     Sequence Pair (HSP) returned from BlastX. The 
@@ -143,8 +148,6 @@ class Hsp(object):
         print >> logfile, "Frame: {}".format(self.frame)
         print >> logfile, "Start: {}, End: {}".format(self.query_start, self.query_end)
 
-#######################################
-
 class Tile_Path(object):
     """An object to hold information about the tile and 
     methods for adding new HSPs to the tile. If an HSP 
@@ -182,22 +185,52 @@ class Tile_Path(object):
         self.tile = False # Has anything other than the first hsp been added to the tile?
         self.codon_usage = codon_usage
         self.score = best_hsp.score
-        self.description = "[GI={};S={}]".format(best_hsp.hitID, best_hsp.bitscore)
+        self.hitID = best_hsp.hitID
+        self.bitscore = best_hsp.bitscore
+
         self.saveProteinCoding = True
+        self.outputProtein = False
 
     def __str__(self):
         """Print tile sequence if changes have been made, 
         else return unchanged contig.
         """
         if self.tile:
-            seq = self.nt_seq
+            if not self.outputProtein:
+                seq = self.nt_seq
+            else:
+                seq = self.aa_seq
         else:
-            seq = self.contig.sequence
+            if not self.outputProtein:
+                seq = self.contig.sequence
+            else:
+                seq = translate_sequence(self.contig.sequence, self.strand)
 
-        tmp = ">{}_{} {}\n".format(self.contig.name, self.start, self.description)
+        tmp = ">{} {}\n".format(self.contig.name, self.getDescription())
         for i in range(0, len(seq), 60):
             tmp += "{}\n".format(seq[i:i+60])
         return tmp[:-1]
+
+    def outputProtein(self, protein=True):
+        """Output protein sequence when being printed
+
+        Paramters:
+        __________
+        protein - bool. Enable protein output. Default is True.
+        """
+        self.outputProtein = protein
+
+    def getDescription(self):
+        """Return an updated description with start position of corrected
+        contig, frame the corrected contig was in (now in frame 1), the best
+        hit that started the tile, and the bit score of that hit. The last two
+        options are only available if the annotation file was creating the NCBI
+        header.
+        """
+        return "[Start={};Frame={};GI={};S={}]".format(self.start, 
+                                                       self.frame, 
+                                                       self.hitID, 
+                                                       self.bitscore)
 
     def add_hsp(self, hsp, location, fill=0): 
         """Generic method to add an hsp to the tile path. 
@@ -213,13 +246,13 @@ class Tile_Path(object):
 
         Input:
         hsp - Hsp object if Hsp to add.
-        location - either "upstream" or "downstream." The 
+        location - either upstream (0) or downstream (1). The 
             location of the HSP relative to the existing tile.
         fill - int. the absolute difference between the end 
             of the tile and the end of the HSP; adjust to mend
             possible frameshifts
         """
-        if location == 'upstream': # add hsp to 5' end
+        if location == UPSTREAM: # add hsp to 5' end
             self.start = hsp.query_start # adjust nucleotide coordinates relative to contig
             self.hsps.appendleft(hsp) # append hsp to list of those included at correct end
             
@@ -244,7 +277,7 @@ class Tile_Path(object):
                                           gap,
                                           self.nt_seq)
 
-        elif location == 'downstream': # add hsp to 3' end
+        elif location == DOWNSTREAM: # add hsp to 3' end
             self.end = hsp.query_end
             self.hsps.append(hsp)
 
@@ -503,8 +536,11 @@ class EmptyTilePath(Tile_Path):
     def __init__(self, contig):
         self.contig = contig
         self.tile = False
-        self.description = "[GI={};S={}]".format(None, 0.0)
         self.start = 0
+        self.strand = 1
+        self.frame = 1
+        self.hitID = None
+        self.bitscore = 0.0
 
 #######################################
 #Global functions
@@ -563,19 +599,26 @@ def codons(sequence):
     return protein
 
 complement_table = string.maketrans("ACGT", "TGCA")
-def revcomp(dna):
-    """returns the reverse complement of a sequence
+def revcomp(sequence):
+    """returns the reverse complement of a sequence. Adapted from Kevin Karplus'
+    BME 205 assignment 1 at UCSC.
 
     Input:
-    dna - string containing dna sequence
+    sequence - string containing nucleotide sequence
     """
-    return dna[::-1].translate(complement_table) 
+    return sequence[::-1].translate(complement_table) 
 
-def sixframe(dna):
-    rev_comp = revcomp(dna)
+def sixframe(sequence):
+    """Calculate the six frame trnaslation of a nucleotide sequence.
+
+    Parameters:
+    ___________
+    sequence - string containing nucleotide sequence
+    """
+    rev_comp = revcomp(sequence)
     sixframe = {}
     for i in range (0, 3):
-        seq = dna[i:] # get frames positive strand
+        seq = sequence[i:] # get frames positive strand
         protein = codons(seq)
         sixframe [i+1] = protein
         rev = rev_comp[i:] # reverse complement and do again to get the other 3 frames
@@ -628,6 +671,10 @@ def parse_args(args):
                                  action="store_true",
                                  help="Compute the codon usage table for given fasta sequences")
     #Define output
+    parser.add_argument("-p", "--protein",
+                        default=False,
+                        action="store_true",
+                        help="Output protein sequence. Default is false.")
     parser.add_argument("-o", "--outfile",
                         type=argparse.FileType('wt'),
                         default=sys.stdout,
@@ -725,12 +772,35 @@ def run(fasta,
                             continue
 
                         # determine whether incoming hsp is 5' or 3' of tile
+                        # determine whether incoming hsp is 5' or 3' of tile
                         if hsp.query_start <= tile.start: # hsp nt seq 5' of tile
-                            location = 'upstream'
+                            location = UPSTREAM
                             distance = abs(hsp.query_end - tile.start)
                         elif hsp.query_end >= tile.end: # hsp nt seq 3' of tile
-                            location = 'downstream'
+                            location = DOWNSTREAM
                             distance = abs(hsp.query_start - tile.end)
+
+                        #Attempt to add overlapping sequences that have the same start position as the tile
+                        #but is longer than the current start, and adds hsps that have the same end position
+                        #but extend longer on the 5' end.
+                        """if hsp.query_start < tile.start: # hsp nt seq 5' of tile
+                            location = UPSTREAM
+                            distance = abs(hsp.query_end - tile.start)
+                        elif hsp.query_start == tile.start and hsp.query_end < tile.hsps[0].query_end:
+                            location = UPSTREAM
+                            distance = abs(hsp.query_end - tile.start)
+                        elif hsp.query_start == tile.start and hsp.query_end > tile.hsps[0].query_end:
+                            location = DOWNSTREAM
+                            distance = abs(hsp.query_start - tile.end)
+                        elif hsp.query_end > tile.end: # hsp nt seq 3' of tile
+                            location = DOWNSTREAM
+                            distance = abs(hsp.query_start - tile.end)
+                        elif hsp.query_end == tile.end and hsp.query_start < tile.hsps[-1].query_start:
+                            location = UPSTREAM
+                            distance = abs(hsp.query_end - tile.start)
+                        elif hsp.query_end == tile.end and hsp.query_start > tile.hsps[-1].query_start: # hsp nt seq 3' of tile
+                            location = DOWNSTREAM
+                            distance = abs(hsp.query_start - tile.end)"""
 
                         # determine whether hsps overlap and add if they do
                         if ((hsp.query_start <= tile.start <= hsp.query_end) or 
@@ -741,9 +811,9 @@ def run(fasta,
                         else: 
 
                             # check hsp locations make sense before continuing
-                            if location == 'upstream': 
+                            if location == UPSTREAM: 
                                 assert hsp.query_end < tile.start 
-                            elif location == 'downstream':
+                            elif location == DOWNSTREAM:
                                 assert hsp.query_start > tile.end 
 
                             # check if hsp is close enough to tile to incorporate
@@ -763,10 +833,10 @@ def run(fasta,
                                 #something must have been inserted into the contig.  Statement is unwieldy 
                                 #because test must be made for every combination of hsps upstream and 
                                 #downstream of the tile and on positive and negative strands.
-                                if ((location == 'upstream' and 
+                                if ((location == UPSTREAM and 
                                     ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0) or 
                                      (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 == 0))) or 
-                                   (location == 'downstream' and 
+                                   (location == DOWNSTREAM and 
                                     ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 == 0) or 
                                      (tile.strand == -1 and tile.hsps[0].hit_start - hsp.hit_end -1 == 0)))): 
                                     tile.add_insert(hsp, location, distance)
@@ -776,10 +846,10 @@ def run(fasta,
                                 #gap relative to the contig, something must have been deleted from the contig.  
                                 #If this is true and there is a nucleotide gap, the nucleotides in that gap 
                                 #must have been substituted in the contig. Statement is unwieldy as above
-                                elif ((location == 'upstream' and 
+                                elif ((location == UPSTREAM and 
                                       ((tile.strand == 1 and tile.hsps[0].hit_start - hsp.hit_end -1 > 0) or 
                                        (tile.strand == -1 and hsp.hit_start - tile.hsps[0].hit_end -1 > 0))) or 
-                                     (location == 'downstream' and 
+                                     (location == DOWNSTREAM and 
                                       ((tile.strand == 1 and hsp.hit_start - tile.hsps[-1].hit_end -1 > 0) or 
                                        (tile.strand == -1 and tile.hsps[0].hit_end - hsp.hit_start -1 > 0)))): 
                                     tile.add_subst(hsp, location, distance)
@@ -846,6 +916,9 @@ def main(args):
         if tile.tile:
             #Save the protein coding region (tile expanded to closest start and stop codons)
             tile.extendReadingFrame()
+
+        if args.protein:
+            tile.outputProtein()
         
         #Save the tiles region
         print >> args.outfile, tile
