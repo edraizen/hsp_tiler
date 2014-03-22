@@ -66,9 +66,9 @@ class Hsp(object):
             raise SystemExit ('Cannot parse HSP data correctly')
         
         self.frame = abs(int(hsp.find('Hsp_query-frame').text))
-        self.query_start = int(hsp.find('Hsp_query-from').text) #position in nts relative to query
+        self.query_start = int(hsp.find('Hsp_query-from').text)-1 #position in nts relative to query
         self.query_end = int(hsp.find('Hsp_query-to').text)
-        self.hit_start = int(hsp.find('Hsp_hit-from').text) #position in aas relative to hit
+        self.hit_start = int(hsp.find('Hsp_hit-from').text)-1 #position in aas relative to hit
         self.hit_end = int(hsp.find('Hsp_hit-to').text)
         self.evalue = float(hsp.find('Hsp_evalue').text)
         self.score = float(hsp.find('Hsp_score').text)
@@ -177,7 +177,7 @@ class Tile_Path(object):
         self.start = best_hsp.query_start
         self.end = best_hsp.query_end
         self.aa_seq = best_hsp.aa_seq 
-        self.nt_seq = self.contig.sequence[self.start-1 : self.end] # nt sequence of tile from position on contig
+        self.nt_seq = self.contig.sequence[self.start:self.end] # nt sequence of tile from position on contig
         self.hsps = deque([best_hsp]) # double-ended queue allows insertion of hsps at either end
         self.strand = best_hsp.strand
         self.frame = best_hsp.frame
@@ -189,14 +189,14 @@ class Tile_Path(object):
         self.bitscore = best_hsp.bitscore
 
         self.saveProteinCoding = True
-        self.outputProtein = False
+        self.protein = False
 
     def __str__(self):
         """Print tile sequence if changes have been made, 
         else return unchanged contig.
         """
         if self.tile:
-            if not self.outputProtein:
+            if not self.protein:
                 seq = self.nt_seq
             else:
                 seq = self.aa_seq
@@ -218,7 +218,7 @@ class Tile_Path(object):
         __________
         protein - bool. Enable protein output. Default is True.
         """
-        self.outputProtein = protein
+        self.protein = protein
 
     def getDescription(self):
         """Return an updated description with start position of corrected
@@ -262,16 +262,16 @@ class Tile_Path(object):
                     gap = "X"*len(gap)
                 else:
                     gap = self.contig.sequence[hsp.query_end:hsp.query_end+fill]
-                new_nt = self.contig.sequence[self.start-1:hsp.query_end]
+                new_nt = self.contig.sequence[self.start:hsp.query_end]
             else:
                 #No Gap
                 gap = ""
-                new_nt = self.contig.sequence[self.start-1:hsp.query_end+fill]
+                new_nt = self.contig.sequence[self.start:hsp.query_end+fill]
 
             print >> logfile, "Adding HSP upstream"
             print >> logfile, "Original sequence:", self.nt_seq
             print >> logfile, "Fill:", fill, "Gap:", gap
-            print >> logfile, "5' Extenison:", new_nt, "len", self.start-1, hsp.query_end+fill, hsp.query_start-fill-1, self.end
+            print >> logfile, "5' Extenison:", new_nt, "len", self.start, hsp.query_end+fill, hsp.query_start-fill, self.end
 
             self.nt_seq = "{}{}{}".format(new_nt,
                                           gap,
@@ -281,22 +281,22 @@ class Tile_Path(object):
             self.end = hsp.query_end
             self.hsps.append(hsp)
 
-            if hsp.query_start-fill-1 < hsp.query_start:
+            if hsp.query_start-fill < hsp.query_start:
                 #Add gap
                 if self.codon_usage:
-                    gap = "X"*len(fill+1)
+                    gap = "X"*len(fill)
                 else:
-                    gap = self.contig.sequence[hsp.query_start-fill-1:hsp.query_start]
+                    gap = self.contig.sequence[hsp.query_start-fill:hsp.query_start]
                 new_nt = self.contig.sequence[hsp.query_start:self.end]
             else:
                 #No Gaps
                 gap = ""
-                new_nt = self.contig.sequence[hsp.query_start-fill-1:self.end]
+                new_nt = self.contig.sequence[hsp.query_start-fill:self.end]
 
             print >> logfile, "Adding HSP downstream"
             print >> logfile, "Original sequence:", self.nt_seq
             print >> logfile, "Fill:", fill, "Gap:", gap
-            print >> logfile, "3' Extenison:", new_nt, "len", self.start-1, hsp.query_end+fill, hsp.query_start-fill-1, self.end
+            print >> logfile, "3' Extenison:", new_nt, "len", self.start, hsp.query_end+fill, hsp.query_start-fill-1, self.end
 
             self.nt_seq = "{}{}{}".format(self.nt_seq,
                                           gap,
@@ -325,13 +325,16 @@ class Tile_Path(object):
         print >> logfile, "Hsp number {} is {} of the tile and overlapping by {} nucleotides".format(hsp.num, 
                                                                                                      location, 
                                                                                                      distance+1)
-        if (distance +1) % 3 == 0:
-            self.add_hsp(hsp, location, 0-(distance+1))
+        print "Distance", distance
+        print "Frame"
+        print (distance +1) % 3, (distance) % 3
+        if (distance) % 3 == 0:
+            self.add_hsp(hsp, location, 0-(distance))
         else:
             print >> logfile, "Hsp number {} not in same frame as tile - correcting".format(hsp.num)
             while (distance +1) % 3 !=0:
                 distance -= 1
-            self.add_hsp(hsp, location, 0-(distance+1))
+            self.add_hsp(hsp, location, 0-(distance))
         print >> logfile, "Overlapping HSP number {} added {} of tile".format(hsp.num, location)
         self.printer()
 
@@ -347,12 +350,16 @@ class Tile_Path(object):
             location of the HSP relative to the existing tile.
         distance - distance between hsp and this tile, used as fill value
         """
-        difference = distance -1
+
+        difference = distance
         if 0 < difference < 3: # assume incorrect insertion - delete inserted nts
+            print >> logfile, "Correct Insertion"
             self.add_hsp(hsp, location)
         elif difference % 3 == 0: # assume correct insertion - include nts and translate
             self.add_hsp(hsp, location, difference)
+            print >> logfile, "incorrect Insertion"
         else: # insertion with frameshift - attempt to fix
+            print >> logfile, "Insertion with frameshift"
             self.correct_frame(hsp, location, distance) 
         
         print >> logfile, "Insertion in contig relative to hit"
@@ -371,7 +378,7 @@ class Tile_Path(object):
             location of the HSP relative to the existing tile.
         distance - distance between hsp and this tile, used as fill value
         """
-        difference = distance -1
+        difference = distance
         if difference == 0 or difference % 3 == 0: # deletion or substitution respectively - include and translate nts if present
             self.add_hsp(hsp, location, difference)
         else: # substitution with frameshift
@@ -394,7 +401,7 @@ class Tile_Path(object):
             location of the HSP relative to the existing tile.
         distance - distance between hsp and this tile, used as fill value
         """
-        difference = distance -1
+        difference = distance
         while difference % 3 != 0: # remove nts until difference is divisible by 3
             difference -= 1
         self.add_hsp(hsp, location, difference) # add hsp with the cropped nts and translate
@@ -410,6 +417,8 @@ class Tile_Path(object):
                        stop farther upstream.
         prokaryotic - bool. Use alternate stop codons found in prokaryotic genomes
         """
+        print "EXPANDING READING FRAME"
+        print "O:", self.aa_seq
         if not prokaryotic:
             startCodons = ["ATG"]
         else:
@@ -419,15 +428,23 @@ class Tile_Path(object):
 
         #Expand upstream to nearest stop codon (if not conserved) of nearest start codon
         #if conservative.
+        print self.contig.sequence
+        print self.contig.sequence[:self.start], "**", self.nt_seq, "**", self.contig.sequence[self.end:]
+        print self.frame
         codons = startCodons if conservative else stopCodons
         start = self.start
-        while start >= 3 and not self.contig.sequence[start:start+3] in codons:
+        while start >= 0 and not self.contig.sequence[start:start+3] in codons:
+            print self.contig.sequence[start:start+3], start
+            if start<3:
+                break 
             start -= 3
 
         #Make sure that start is actaully a start or stop codon
         if not self.contig.sequence[start:start+3] in codons:
+            print "no stop at start"
             start = self.start
-            print >> logfile, "Warning, contig {} has no start codon within frame".format(self.contig.name)
+            print >> logfile, "Warning, contig {} has no first stop codon within frame".format(self.contig.name)
+
 
         #Find closest stop codon
         end = self.end-3
@@ -445,7 +462,8 @@ class Tile_Path(object):
         self.nt_seq = "{}{}{}".format(self.contig.sequence[start:self.start],
                                       self.nt_seq,
                                       self.contig.sequence[self.end:end+3])
-        self.aa_seq = self.aa_seq = translate_sequence(self.nt_seq, self.strand)
+        self.aa_seq = translate_sequence(self.nt_seq, self.strand)
+        print "U:", self.aa_seq
 
     def determineGaps(self):
         """Replace Xs with a cartesian product of all nucleotides.
