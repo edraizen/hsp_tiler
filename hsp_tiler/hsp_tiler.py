@@ -195,16 +195,10 @@ class Tile_Path(object):
         """Print tile sequence if changes have been made, 
         else return unchanged contig.
         """
-        if self.tile:
-            if not self.protein:
-                seq = self.nt_seq
-            else:
-                seq = self.aa_seq
+        if not self.protein:
+            seq = self.nt_seq
         else:
-            if not self.outputProtein:
-                seq = self.contig.sequence
-            else:
-                seq = translate_sequence(self.contig.sequence, self.strand)
+            seq = self.aa_seq
 
         tmp = ">{} {}\n".format(self.contig.name, self.getDescription())
         for i in range(0, len(seq), 60):
@@ -325,9 +319,6 @@ class Tile_Path(object):
         print >> logfile, "Hsp number {} is {} of the tile and overlapping by {} nucleotides".format(hsp.num, 
                                                                                                      location, 
                                                                                                      distance+1)
-        print "Distance", distance
-        print "Frame"
-        print (distance +1) % 3, (distance) % 3
         if (distance) % 3 == 0:
             self.add_hsp(hsp, location, 0-(distance))
         else:
@@ -417,8 +408,7 @@ class Tile_Path(object):
                        stop farther upstream.
         prokaryotic - bool. Use alternate stop codons found in prokaryotic genomes
         """
-        print "EXPANDING READING FRAME"
-        print "O:", self.aa_seq
+        
         if not prokaryotic:
             startCodons = ["ATG"]
         else:
@@ -428,20 +418,15 @@ class Tile_Path(object):
 
         #Expand upstream to nearest stop codon (if not conserved) of nearest start codon
         #if conservative.
-        print self.contig.sequence
-        print self.contig.sequence[:self.start], "**", self.nt_seq, "**", self.contig.sequence[self.end:]
-        print self.frame
         codons = startCodons if conservative else stopCodons
         start = self.start
         while start >= 0 and not self.contig.sequence[start:start+3] in codons:
-            print self.contig.sequence[start:start+3], start
             if start<3:
                 break 
             start -= 3
 
         #Make sure that start is actaully a start or stop codon
         if not self.contig.sequence[start:start+3] in codons:
-            print "no stop at start"
             start = self.start
             print >> logfile, "Warning, contig {} has no first stop codon within frame".format(self.contig.name)
 
@@ -463,7 +448,6 @@ class Tile_Path(object):
                                       self.nt_seq,
                                       self.contig.sequence[self.end:end+3])
         self.aa_seq = translate_sequence(self.nt_seq, self.strand)
-        print "U:", self.aa_seq
 
     def determineGaps(self):
         """Replace Xs with a cartesian product of all nucleotides.
@@ -559,6 +543,10 @@ class EmptyTilePath(Tile_Path):
         self.frame = 1
         self.hitID = None
         self.bitscore = 0.0
+        self.start = 0
+        self.end = len(self.contig.sequence)
+        self.nt_seq = self.contig.sequence[:]
+        self.aa_seq = translate_sequence(self.contig.sequence, self.strand)
 
 #######################################
 #Global functions
@@ -931,9 +919,8 @@ def main(args):
                     filterType=args.filterType,
                     codon_usage=codon_usage
                     ):
-        if tile.tile:
-            #Save the protein coding region (tile expanded to closest start and stop codons)
-            tile.extendReadingFrame()
+        #Save the protein coding region (tile expanded to closest start and stop codons)
+        tile.extendReadingFrame()
 
         if args.protein:
             tile.outputProtein()
