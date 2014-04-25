@@ -548,6 +548,53 @@ class EmptyTilePath(Tile_Path):
         self.nt_seq = self.contig.sequence[:]
         self.aa_seq = translate_sequence(self.contig.sequence, self.strand)
 
+    def useLongestORF(self):
+        """Find longest ORF in either frame.
+        """
+        stopCodons = ["TAG", "TAA", "TGA"]
+
+        lenLongestORF = 0
+        startLongestORF = 0
+        endLongestORF = 0
+        frameLongestORF = 1
+
+        openOrf = [False for _ in xrange(3)]
+
+        rc = revcomp(self.nt_seq)
+
+        for strand, seq in zip((+1, -1), (self.nt_seq, rc)):
+            for i in range(len(seq)):
+                frame = i%3
+                codon = seq[i:i+3]
+                
+                if codon in stopCodons and not openOrf[frame]:
+                    #Begin ORF if no other orf is started in current frame 
+                    #save position in current frame
+                    openOrf[frame] = i
+
+                elif codon in stopCodons and openOrf[frame]:
+                    #Stop open ORFS in current frame if an orf is open
+                    #If found orf is greater than longest, reset it to the longest
+                    orfLength = i-openOrf[frame]
+                    if orfLength > lenLongestORF:
+                        lenLongestORF = orfLength
+                        startLongestORF = openOrf[frame]
+                        endLongestORF = i+3
+                        frameLongestORF = frame*strand+1
+
+                    #Clear open ORF in current frame
+                    openOrf[frame] = False
+        
+        self.start = startLongestORF+3
+        self.end = endLongestORF
+        self.frame = frameLongestORF
+        if frameLongestORF < 0:
+            self.nt_seq = rc[self.start:self.end]
+        else:
+            self.nt_seq = self.nt_seq[self.start:self.end]
+        self.aa_seq = translate_sequence(self.nt_seq)
+
+
 #######################################
 #Global functions
 #######################################
@@ -631,75 +678,6 @@ def sixframe(sequence):
         protein = codons(rev)
         sixframe [0-i-1] = protein
     return sixframe
-
-def parse_args(args):
-    """Parsing command line options
-    """
-    parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
-    # name of fasta file 
-    parser.add_argument("-f", "--fasta", 
-                        required=True, 
-                        type=argparse.FileType('r'),
-                        help="Fasta file containing sequences")
-    # name of annotation file (in xml format as code currently stands)
-    parser.add_argument("-a", "--annotation", 
-                        required=True, 
-                        type=argparse.FileType('r'),
-                        help="Blastx xml file containing annotations for sequences")
-    # gap limit
-    parser.add_argument("-g", "--gap_limit", 
-                        type=int, 
-                        default=15, 
-                        help="Cutoff for distance between hsps. If the gap between hsps in nucleotides is greater than this value, the hsp will not be added to the tile.  Default = 15nt")
-    #evlaue cutoff
-    parser.add_argument("-e", "--evalue_cutoff",
-                        type=float,
-                        default=1e-10,
-                        help="Only allow Blast Hist less than or equal to cutoff. Default is 1e-10")
-    #Use every hit for eqch query instead of just the 1st one
-    parser.add_argument("--allHits",
-                        default=False,
-                        help="Use all hits from annotation. Default is to use only the first, high scoring hit. Optional.",
-                        action="store_true")
-    #family/species filter
-    parser.add_argument("--filter",
-                        required=False,
-                        help="Filter out blastx hits from a given species and fmily name using full scientific names only for now")
-    parser.add_argument("--filterType",
-                        default=0, #0 for ncbi, 1 for uniprot
-                        help="Regex to retrive taxon info from hit. Use 0 for NCBI, or 1 for uniprot, or the full regex query")
-    #Use codon usage to fill gaps?
-    codonUsageGroup = parser.add_mutually_exclusive_group()
-    codonUsageGroup.add_argument("--codon_usage",
-                                help="Path to file, URL, or ID of file contaning codon usage")
-    codonUsageGroup.add_argument("--compute_codon",
-                                 default=False,
-                                 action="store_true",
-                                 help="Compute the codon usage table for given fasta sequences")
-    #Define output
-    parser.add_argument("-p", "--protein",
-                        default=False,
-                        action="store_true",
-                        help="Output protein sequence. Default is false.")
-    parser.add_argument("-o", "--outfile",
-                        type=argparse.FileType('wt'),
-                        default=sys.stdout,
-                        help="File to save corrected sequences")
-    parser.add_argument("-l", "--logfile",
-                        type=argparse.FileType('wt'),
-                        default=sys.stderr,
-                        help="File to save log")
-
-    if args[0] == __file__:
-        args = args[1:]
-
-    # print help message if no arguments are given
-    if len(args) == 0:
-        parser.print_help()
-        sys.exit(1)
-
-    #Parse args
-    return parser.parse_args(args)
 
 def run(fasta, 
         annotation, 
@@ -878,6 +856,89 @@ def run(fasta,
 #Main
 #######################################
 
+def parse_args(args):
+    """Parsing command line options
+    """
+    parser = argparse.ArgumentParser(description="Takes a fasta file of sequences and a BLASTX annotation of that file in xml format.  Attempts to tile Hsps for the highest scoring hit for each sequence, correcting frameshifts in order to improve subsequent annotations.")
+    # name of fasta file 
+    parser.add_argument("-f", "--fasta", 
+                        required=True, 
+                        type=argparse.FileType('r'),
+                        help="Fasta file containing sequences")
+    # name of annotation file (in xml format as code currently stands)
+    parser.add_argument("-a", "--annotation", 
+                        required=True, 
+                        type=argparse.FileType('r'),
+                        help="Blastx xml file containing annotations for sequences")
+    # gap limit
+    parser.add_argument("-g", "--gap_limit", 
+                        type=int, 
+                        default=15, 
+                        help="Cutoff for distance between hsps. If the gap between hsps in nucleotides is greater than this value, the hsp will not be added to the tile.  Default = 15nt")
+    #evlaue cutoff
+    parser.add_argument("-e", "--evalue_cutoff",
+                        type=float,
+                        default=1e-10,
+                        help="Only allow Blast Hist less than or equal to cutoff. Default is 1e-10")
+    #Use every hit for eqch query instead of just the 1st one
+    parser.add_argument("--useHit1",
+                        default=False,
+                        action="store_true",
+                        help="Use only the first, high scoring hit for each sequence. Defualt is to use all hits from annotation. Default is to all hits. Optional.")
+    #family/species filter
+    parser.add_argument("--filter",
+                        required=False,
+                        help="Filter out blastx hits from a given species and fmily name using full scientific names only for now")
+    parser.add_argument("--filterType",
+                        default=0, #0 for ncbi, 1 for uniprot
+                        help="Regex to retreive taxon info from hit. Use 0 for NCBI, or 1 for uniprot, or the full regex query")
+    #Use codon usage to fill gaps?
+    codonUsageGroup = parser.add_mutually_exclusive_group()
+    codonUsageGroup.add_argument("--codon_usage",
+                                help="Path to file, URL, or ID of file contaning codon usage")
+    codonUsageGroup.add_argument("--compute_codon",
+                                 default=False,
+                                 action="store_true",
+                                 help="Compute the codon usage table for given fasta sequences")
+    #Handle sequences with no hits
+    noHitGroup = parser.add_mutually_exclusive_group()
+    noHitGroup.add_argument("--ignoreNoHit",
+                            default=True,
+                            action="store_true",
+                            help="Ignore sequence if there are no BLAST hits")
+    noHitGroup.add_argument("--noHitORF",
+                            default=False,
+                            action="store_true",
+                            help="Output the longest open reading frame for the sequences with no BLAST hits")
+    noHitGroup.add_argument("--noHitFrame1",
+                            default=False,
+                            action="store_true",
+                            help="Output the first reading frame for the sequences with no BLAST hits")
+    #Define output
+    parser.add_argument("-p", "--protein",
+                        default=False,
+                        action="store_true",
+                        help="Output protein sequence. Default is false.")
+    parser.add_argument("-o", "--outfile",
+                        type=argparse.FileType('wt'),
+                        default=sys.stdout,
+                        help="File to save corrected sequences")
+    parser.add_argument("-l", "--logfile",
+                        type=argparse.FileType('wt'),
+                        default=sys.stderr,
+                        help="File to save log")
+
+    if args[0] == __file__:
+        args = args[1:]
+
+    # print help message if no arguments are given
+    if len(args) == 0:
+        parser.print_help()
+        sys.exit(1)
+
+    #Parse args
+    return parser.parse_args(args)
+
 def main(args):
     #Parse arguments
     args = parse_args(args)
@@ -904,9 +965,9 @@ def main(args):
     print >> logfile, "# Outfile: {}".format(args.outfile.name)
     if args.codon_usage:
         print >> logfile, "#Codon Usage: {}".format(args.codon_usage)
-    print >> logfile, "# Parameters: gap_limit={}, evalue_cutoff={}, allHits={}, filter=\"{}\"".format(args.gap_limit,
+    print >> logfile, "# Parameters: gap_limit={}, evalue_cutoff={}, useHit1={}, filter=\"{}\"".format(args.gap_limit,
                                                                                                        args.evalue_cutoff,
-                                                                                                       args.allHits,
+                                                                                                       args.useHit1,
                                                                                                        args.filter)
 
     #Run hsp_tiler
@@ -914,13 +975,23 @@ def main(args):
                     args.annotation, 
                     gap_limit=args.gap_limit,
                     evalue_cutoff=args.evalue_cutoff, 
-                    allHits=args.allHits, 
+                    allHits=not args.useHit1, 
                     filter=args.filter,
                     filterType=args.filterType,
                     codon_usage=codon_usage
                     ):
-        #Save the protein coding region (tile expanded to closest start and stop codons)
-        tile.extendReadingFrame()
+        if type(tile) == EmptyTilePath:
+            if args.noHitORF:
+                tile.useLongestORF()
+            elif args.noHitFrame1:
+                #This will be done automatically
+                pass
+            else:
+                #Ignore Hit, default
+                continue
+        else:
+            #Save the protein coding region (tile expanded to closest start and stop codons)
+            tile.extendReadingFrame()
 
         if args.protein:
             tile.outputProtein()
