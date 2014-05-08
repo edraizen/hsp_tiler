@@ -16,7 +16,7 @@ try:
 	from Bio.Blast.Applications import NcbiblastxCommandline
 	hasBLAST = True
 except ImportError:
-	hasBlast = False
+	hasBLAST = False
 
 #Custom imports
 from read_fasta import read_fasta
@@ -25,18 +25,18 @@ from read_fasta import read_fasta
 
 def get_original_scores(fastaFile):
 	#Parse out gi number and score from each updated contig
-	seqPattern = re.compile("\[GI\=(.*?)\;S\=(.*?)\]")
+	seqPattern = re.compile("GI\=(.*?)\;S\=(.*?)]")
 	originalScores = []
 	not_corrected = []
 	ids = {}
 	for seq in read_fasta(fastaFile):
-		seqInfo = seqPattern.match(seq.description)
+		seqInfo = seqPattern.search(seq.description)
 		if not seqInfo:
 			raise RuntimeError("Sequnces must contain HSP-Tiler headers.")
-
+		
 		contig = seq.name #.split("_")[0]
-		gi = seqInfo.group(1)
-		score = float(seqInfo.group(2))
+		gi = seqInfo.groups()[0]
+		score = float(seqInfo.groups()[1])
 		yield contig, gi, score 
 		#ids[seq.name.split("_")[0]] = gi
 
@@ -82,61 +82,32 @@ def run_blastx(fastaFile, blastdb, num_threads=3, blastpath=""):
 	return open(blastFile)
 
 def compare(results, original_scores):
+	"""Compare the original scores to the updated scores. The sequence that
+	started tile's score is looked at before and after.
+
+	Parameters:
+	___________
+	results : dictionary with key a tuple of contig and gi and value the score, 
+		from read_blastx_bitscores
+	original_scores : iterable that returns the original contig name, the
+		original GI that starte the tile, and the score of the original
+		BLAST run.
+	"""
 	for originalContig, originalGI, originalScore in original_scores:
 		try:
-			score = max(s for (contig, gi), s in results if contig==originalContig)
+			scoresForContig = {gi: score for (contig, gi), score in results.iteritems() \
+				if contig==originalContig}
+
+			print
+			if originalGI in scoresForContig:
+				score = scoresForContig[originalGI]
+			else:
+				print "No Score for", originalGI		
+				score = 0.0 #max(scoresForContig)
 		except:
 			print "No score for {}, with original score of {}".format(originalContig, originalScore)
 			score = originalScore
 		yield originalContig, originalScore, score
-
-	"""
-	updatedScores = resultsFile
-	updatedContig, updatedGI, updatedScore = next(updatedScores)
-	originalContig, originalGI, originalScore = next(original_scores)
-	done = False
-	while not done:
-		print "originalContig={}, originalGI={}, originalScore={}".format(originalContig, originalGI, originalScore)
-		print "updatedContig={}, updatedGI={}, updatedScore={}".format(updatedContig, updatedGI, updatedScore)
-		if originalScore == 0.0:
-			#Was not found in the database before or after
-			yield originalContig, 0.0, 0.0
-			try:
-				originalContig, originalGI, originalScore = next(original_scores)
-			except StopIteration:
-				done = True
-			print "next original"
-		else:
-			if originalContig == updatedContig:
-				if originalGI == updatedGI:
-					yield updatedContig, originalScore, updatedScore
-
-					while originalContig == updatedContig:
-						try:
-							updatedContig, updatedGI, updatedScore = next(updatedScores)
-						except StopIteration:
-							done = True
-						print "next updated", updatedContig
-
-					try:
-						originalContig, originalGI, originalScore = next(original_scores)
-					except StopIteration:
-						done = True
-					print "next original"
-
-					
-				else:
-					try:
-						updatedContig, updatedGI, updatedScore = next(updatedScores)
-					except StopIteration:
-						done = True
-					print "next updated", updatedContig
-			else:
-				try:
-					updatedContig, updatedGI, updatedScore = next(updatedScores)
-				except StopIteration:
-					done = True
-				print "next updated", updatedContig"""
 
 def read_blastx_bitscores(resultsFile):
 	"""Process blastx tab delimeted output. Only saves best hit for each query
@@ -150,10 +121,10 @@ def read_blastx_bitscores(resultsFile):
 	-scores, list of bitsocres for each hit
 	"""
 	results = {}
-	for field in csv.reader(resultsFile, delimiter="\t"):
-		contig = field[0] #.split("_")[0]
-		gi = field[1].split("|")[1]
-		updatedScore = float(field[11])
+	for fields in csv.reader(resultsFile, delimiter="\t"):
+		contig = fields[0] #.split("_")[0]
+		gi = fields[1].split("|")[1] if "|" in fields[1] else fields[1]
+		updatedScore = float(fields[11])
 		results[(contig, gi)] = updatedScore
 	return results
 
@@ -170,7 +141,7 @@ def write_scores(updated_scores, outfile):
 	for contig, originalScore, updatedScore in updated_scores:
 		print "Writing", contig, originalScore, updatedScore 
 		if originalScore != 0.0:
-			score = originalScore/updatedScore
+			score = updatedScore/originalScore if originalScore else 0.0
 		else:
 			score = 0.0
 		print >> outfile, "{}\t{}\t{}\t{}".format(contig, originalScore, updatedScore, score)

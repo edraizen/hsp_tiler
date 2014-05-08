@@ -16,6 +16,7 @@ from prettyplotlib import plt
 import matplotlib as mpl
 #import matplotlib.pyplot as plt
 from prettyplotlib import brewer2mpl
+from matplotlib.backends.backend_pdf import PdfPages
 
 #Import custum libraries
 from hsp_score import read_scores
@@ -23,10 +24,10 @@ from hsp_score import read_scores
 """View the improvements of HSP-Tiler in scatterplots
 and histograms"""
 
-def analyze(original, updated, scatterName=None, histName=None):
+def analyze(original, updated, scatterName=None, histName=None, log=False):
     """plot both scatterplot and histogram"""
     scatter(original, updated, save=scatterName)
-    histogram(original, updated, save=histName)
+    histogram(original, updated, save=histName, log=log)
 
 
    
@@ -67,6 +68,7 @@ def scatter(original, updated, main="", save=None):
     sep = 500
     xticks = range(0, xMax, sep)
     yticks = range(0,yMax,sep)
+    color_cycle = brewer2mpl.get_map('Set2', 'qualitative', 8).mpl_colors
 
     fig, ax = plt.subplots()
     ax.set_title(main)
@@ -77,7 +79,8 @@ def scatter(original, updated, main="", save=None):
     #Plot postive improvement (green, automatically by prettyplotlib)
     if positiveImprovement:
         ppl.scatter(ax, *zip(*positiveImprovement), 
-                    label="Positive Improvement ({} seqs)".format(len(positiveImprovement)))
+                    label="Positive Improvement ({} seqs)".format(len(positiveImprovement)),
+                    color=color_cycle[0])
 
     #Draw no improvement line
     ppl.plot(ax, (0,xMax), (0,xMax), color='k', linestyle='-', linewidth=2,
@@ -86,7 +89,8 @@ def scatter(original, updated, main="", save=None):
     #Plot negative improvement (red, automatically by prettyplotlib)
     if negativeImprovement:
         ppl.scatter(ax, *zip(*negativeImprovement),
-                    label="Negative Improvement ({} seqs)".format(len(negativeImprovement)))
+                    label="Negative Improvement ({} seqs)".format(len(negativeImprovement)),
+                    color=color_cycle[1])
 
     #Draw labels
     ppl.legend(ax)
@@ -98,9 +102,11 @@ def scatter(original, updated, main="", save=None):
     if save is None:
         plt.show()
     else:
-        plt.savefig(save)
+        pp = PdfPages(save)
+        pp.savefig(fig)
+        pp.close()
 
-def histogram(original, updated, bins=None, main="", save=None):
+def histogram(original, updated, bins=None, main="", save=None, log=False):
     """Plot a histogram of score improvements (updated-origianl)
 
     Input:
@@ -140,7 +146,7 @@ def histogram(original, updated, bins=None, main="", save=None):
     width = 1.0
     #ax.set_xticks(np.arange(len(improvements)))
     #ax.set_xticklabels([l for l, u in keys])
-    bar(ax, np.arange(len(improvements)), values, log=True,
+    bar(ax, np.arange(len(improvements)), values, log=log,
         annotate=True, grid='y', xticklabels=[l for l, u in keys])
 
     if save is None:
@@ -402,8 +408,12 @@ def remove_chartjunk(ax, spines, grid=None, ticklabels=None, show_ticks=False):
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize HSP-Tiler output")
     parser.add_argument("-s", "--scores",
-                           type=argparse.FileType('r'),
-                           help="BLAST output file with updated scores")
+                        type=argparse.FileType('r'),
+                        help="BLAST output file with updated scores")
+    parser.add_argument("-l", "--log",
+                        default=False,
+                        action="store_true",
+                        help="Make histogram on log scale")
     #Define output
     parser.add_argument("--scatterplot",
                         required=False,

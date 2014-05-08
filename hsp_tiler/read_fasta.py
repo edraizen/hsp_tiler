@@ -2,25 +2,12 @@
 #File: read_fasta
 #Date: 10/10/12
 
+#Standard libraries
 import sys, re
 import string
 
-class Sequence(object):
-    def __init__(self):
-        #Initialize an empty sequence
-        self.name = ""
-        self.description = ""
-        self.sequence = ""
-
-    def __len__(self):
-        return len(self.sequence)
-
-    def __str__(self):
-        space = len(self.description)>0 and " " or ""
-        tmp = ">{}{}{}\n".format(self.name, space, self.description)
-        for i in range(0, len(self.sequence), 60):
-            tmp += "{}\n".format(self.sequence[i:i+60])
-        return tmp[:-1]
+#Custom libraries
+from Sequence import DNASequence 
 
 def read_fasta(inFile, alphabet=None):
     """Read in fasta file and return sequence objects with the fasta data
@@ -46,7 +33,7 @@ def read_fasta(inFile, alphabet=None):
         
         if line.startswith(">"):
             #Start new sequence and get id and comment
-            fastaSeq = Sequence()
+            fastaSeq = DNASequence()
             
             #Get name and desciption
             try:
@@ -63,7 +50,6 @@ on line '{}'".format(line)
             sys.exit(1)
         else:
             #Append line to sequence
-            #Translate may be faster, but I kept on removing the wrong characters
             for seq in alphabet.findall(line):
                 fastaSeq.sequence += seq.upper()
     

@@ -1,58 +1,100 @@
+# Author: Eli Draizen
+# Date 5-1-14
+# File: BlastXMLParser.py
+
+#Standard libraries
 import sys
 import xml.etree.cElementTree as ET
 import re
+from math import exp
 
-regexTaxFilters = {0:re.compile("^.+\[(.+)\]"),  #nr
-                   2:re.compile("OS=(\w+\s\s+)") #uniprot
-                  }
+#Custom libraries
+from Parser import Parser, Match, Matches
 
-class BlastXMLParser(object):
+class HSP(Match):
+    """Holds information about a given High-scoring Sequence Pair (HSP) 
+    returned from BLASTX.
+    """
+    def __init__(self, hsp, rapsearch=False):
+        """Initialise an Hsp object, with the XML 
+        representation of the hsp, and a contig.  
+
+        Parameter:
+        __________
+        hsp : Element object containing HSP information
+        """
+        frame = int(hsp.find('Hsp_query-frame').text)
+        if rapsearch:
+        	#1 = frames 0,1,2; -1 = frames 3,4,5
+        	self.frame = frame % 3
+        	self.strand = 1 if frame < 3 else -1
+        else:
+	        # 1 = frames 1,2,3; -1 = frames -1,-2,-3 
+	        self.frame = abs(frame)
+	        self.strand = 1 if 0<frame<=3 else -1
+        
+        self.query_start = int(hsp.find('Hsp_query-from').text)-1 #position in nts relative to query
+        self.query_end = int(hsp.find('Hsp_query-to').text)
+        self.hit_start = int(hsp.find('Hsp_hit-from').text)-1 #position in aas relative to hit
+        self.hit_end = int(hsp.find('Hsp_hit-to').text)
+
+        try:
+        	self.evalue = float(hsp.find('Hsp_evalue').text)
+        except:
+        	try:
+        		self.evalue = exp(float(hsp.find('Hsp_log-evalue').text))
+        	except:
+        		raise RuntimeError("XML file must be from BLASTX or RAPSearch2")
+
+        self.score = float(hsp.find('Hsp_score').text)
+        self.bitscore = float(hsp.find('Hsp_bit-score').text)
+        self.hitID = hsp.find("hitID").text
+        self.used = False # True marks hsps that have already been incorporated into the tile
+        self.num = int(hsp.find('Hsp_num').text)
+        self.query_seq = hsp.find('Hsp_qseq').text
+
+class BlastXMLParser(Parser):
 	"""Parses BLAST XML files and easily separates Iterations, Hits, and HSPs without 
 	loading all of the data into memory. Also can filter results by evalue or
 	Taxonmic information.
 
 	Reinventing the wheel. Biopython may be more robust, but this does the job.
 	"""
-	def __init__(self, blast, allHits=False, evalue=1e-10, taxFilter=None, taxFilterType=0):
-		"""Intialise a BLAST XML parser. 
-
-		Parameters:
-		blast - a file-like object containg BLAST XML output
-		allHSP - Use all of the HSP instead of first, top hit
-		evalue - evalue cutoff; defialt 1e-10
-		taxFilter - Ignore hits from given species or genus
+	def __init__(self, *args, **kwds): #blast, allHits=False, evalue=1e-10, taxFilter=None, taxFilterType=0):
+		"""Intialise a BLAST XML parser.
 		"""
-		#Use all of the HSP instead of first, top hit
-		self.allHits = allHits
-		#Save species name or genus and ignore hits from them
-		self.taxFilter = taxFilter
-		#E-value cutoff
-		self.evalue = evalue
+		#Initialize Parser super class
+		Parser.__init__(self, *args, **kwds)
 
 		#Build iter to loop over XML
-		self.context = iter(ET.iterparse(blast, events=("start", "end")))
+		self.context = iter(ET.iterparse(self.infile, events=("start", "end")))
 		#Boolean to allow hits to be returned
 		self.runHSP = True
 		#Save the current contig, or queryID 
 		self.queryID = None
 		#The number of Hits that have been processed
 		self.numHits = 0
+		#File came form RAPSearch2?
+		self.rapsearch = kwds.get("rapsearch", False)
 
 		#Start initial parsing
 		event, root = self.context.next()
-		if not root.tag == "BlastOutput":
-			raise RuntimeError("This is not a valid BLAST XML file")
+
+		if root.tag not in ["BlastOutput", "Output"]:
+			raise RuntimeError("This is not a valid BLAST XML file or RAPSearch2 XML file")
+		elif root.tag == "Output":
+			self.rapsearch = True
 
 		#Start looping over data until we get to first iteration
 		for event, elem in self.context:
 			if event == "start" and elem.tag == "Iteration":
-				break
+				break 
 
-		if taxFilter:
-			if not taxFilterType in regexTaxFilters:
-				self.taxFilterType = re.compile(taxFilterType)
-			else:
-				self.taxFilterType = regexTaxFilters[taxFilterType]
+	def parse(self):
+		"""Real work done here. Combine the query with its HSPs
+		"""
+		for query in self.parseQuery():
+			yield Matches(query, self.parseHsp())
 
 
 	def parseQuery(self):
@@ -98,29 +140,28 @@ class BlastXMLParser(object):
 				#One more hit has been seen
 				self.numHits += 1
 
+				if hitID is None:
+					#RAPSearch doesn't use Hit_id
+					hitID = elem.text
+
 				#Returns all HSP if there is no fitler, else only return HSPS that do not contain filter
-				returnHsp = not self.taxFilter
-				if self.taxFilter:
-					try:
-						#Parse out genus and species if exists
-						taxInfo = self.taxFilterType.findall(elem.text)[0]
-						if len(taxInfo.split()) == 1: 
-							#Error finding taxonomic info
-							taxInfo = elem.text
-					except:
-						taxInfo = elem.text
-					finally:
-						#Only return HSP is the filter is not found within the taxInfo string
-						returnHsp = self.taxFilter not in taxInfo
+				returnHsp = self._filterTaxa(elem.text) if self.taxFilter else True
 
 			elif event == "end" and elem.tag == "Hsp_evalue" and float(elem.text) > self.evalue:
 				#Don't return HSP is evalue is above cutoff
 				returnHsp = False
+			elif event == "end" and elem.tag == "Hsp_log-evalue":
+				#RAPSearch2 uses log(evalue)
+				evalue = exp(float(elem.text))
+				elem.text = evalue
+				if evalue > self.evalue:
+					returnHsp = False
 
 			elif returnHsp and event == "end" and elem.tag == "Hsp":
+				#Add the hitID to current HSP to process later
 				hitElement = ET.SubElement(elem, "hitID")
 				hitElement.text = hitID
-				yield elem
+				yield HSP(elem, rapsearch=self.rapsearch)
 			elif not self.allHits and event == "end" and elem.tag == "Hit_hsps":
 				#Stop after 1st HSP hits are finished
 				break
