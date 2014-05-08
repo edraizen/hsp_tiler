@@ -13,8 +13,9 @@ import sys
 import re
 import string
 from collections import deque
-from itertools import izip, product, tee
+from itertools import product, tee, imap
 from datetime import datetime
+from multiprocessing import Pool
 
 #Custom Libraries
 from read_fasta import read_fasta
@@ -49,7 +50,7 @@ class Tile_Path(object):
 
     If best_hsp is None, then there were no hits.
     """
-    def __init__(self, best_hsp, contig, saveProteinCoding=True, codon_usage=None): 
+    def __init__(self, best_hsp, contig, saveProteinCoding=True, protein=False, codon_usage=None): 
         """Initialise the tile with a single HSP to signify the start 
         and end positions of the tile relative to the contig and the 
         protein sequence of the tile.
@@ -58,6 +59,8 @@ class Tile_Path(object):
         ___________
         best_hsp : Mastch object of the highest scoring Match (Hsp)
         contig : Sequence object of the parent contig
+        saveProteinCoding : bool. Extend sequence to cover entire protein coding region
+        protein : bool. output amino acid sequence
         codon_usage : a dictionary containg the codon usage, must be created 
             using read_codon_usage
         """
@@ -94,10 +97,10 @@ class Tile_Path(object):
         self.tile = False
         
         #Expand tile to cover entire protein coding region
-        self.saveProteinCoding = True
+        self.saveProteinCoding = saveProteinCoding
 
         #Output proteins sequences instead ot nts
-        self.protein = False
+        self.protein = protein
 
     def __str__(self):
         """Print tile sequence if changes have been made, else return unchanged 
@@ -107,6 +110,26 @@ class Tile_Path(object):
         seq.description = self._getDescription()
 
         return str(seq)
+
+    def write(self, outfile):
+        """Save tile to file
+
+        Parameters:
+        ___________
+        outfile : file-like object to write tile
+
+        Return:
+        ________
+        tile append to outfile
+        """
+        #Save the protein coding region (tile expanded to closest start and stop codons)
+        self.extendReadingFrame()
+
+        if self.protein:
+            tile.outputProtein()
+        
+        #Save the tiles region
+        print >> outfile, self
 
     def outputProtein(self, protein=True):
         """Output protein sequence when being printed
@@ -530,7 +553,19 @@ class Tile_Path(object):
         print >> logfile, "Protein: {}".format(self.aa_seq)
 
 class EmptyTilePath(Tile_Path):
-    def __init__(self, contig):
+    def __init__(self, contig, protein=False, no_hit=0):
+        """Initialise an empty tile path - there were no annotations for this
+        contig.
+
+        Parameters:
+        ___________
+        contig : DNASequence object
+        protein : bool. output amino acid sequence
+        no_hit : How to hande sequences with no annotation
+            0=Ignore
+            1=Output longest ORF
+            2=Output frame 1
+        """
         self.contig = contig
         self.tile = False
         self.start = 0
@@ -543,7 +578,8 @@ class EmptyTilePath(Tile_Path):
         self.nt_seq = self.contig
         self.aa_seq = self.contig.translate_sequence(strand=self.strand)
         self.saveProteinCoding = True
-        self.protein = False
+        self.protein = protein
+        self.no_hit = no_hit
 
     def useLongestORF(self):
         """Find longest ORF in either frame.
@@ -591,33 +627,122 @@ class EmptyTilePath(Tile_Path):
             self.nt_seq.sequence = self.contig.sequence[self.start:self.end]
         self.aa_seq = self.contig.translate_sequence(start=self.start, stop=self.stop)
 
-def run(fasta, 
-        annotation,
-        format, 
-        gap_limit=15, 
-        evalue_cutoff=1e-10, 
-        allHits=False, 
-        filter=None,
-        filterType=0,
-        codon_usage=None,
-        ):
-    """Run HSP-Tiler and yield tiles generated for each contig
-    """
-    #Read fasta
-    contigs = read_fasta(fasta)
+    def write(self, outfile):
+        """Save tile to file
 
-    if format in ["blastxml", "rapsearch2"]:
-        #Initilise BLAST XML parser
-        parser = BlastXMLParser(annotation, allHits=allHits, evalue=evalue_cutoff, taxFilter=filter, taxFilterType=filterType)
-    elif format == "pslx":
-        #Initilise BLAT PSLX parser
-        contigs = list(contigs)
-        parser = BlatPSLXParser(annotation, contigs, allHits=allHits, evalue=evalue_cutoff, taxFilter=filter, taxFilterType=filterType)        
-    else:
-        raise RuntimeError("Annotation format is not recognized.")
-    
-    # get list of hsps for highest scoring hit for each contig - go to next contig if no hits
-    for contig, matches in izip_missing(contigs, parser.parse(), key=lambda x: x.name, fillvalue=None):
+        Parameters:
+        ___________
+        outfile : file-like object to write tile
+
+        Return:
+        ________
+        tile append to outfile
+        """
+        if self.no_hit == 1:
+            self.useLongestORF()
+        elif self.no_hit == 2:
+            #This will be done automatically
+            pass
+        else:
+            #Ignore Hit, default
+            return
+
+        if self.protein:
+            self.outputProtein()
+        
+        #Save the tiles region
+        print >> outfile, self
+
+class HSPTiler(object):
+    """Main corrector here
+    """
+    def __init__(self, 
+                 fasta, 
+                 annotation,
+                 format, 
+                 gap_limit=15, 
+                 evalue_cutoff=1e-10, 
+                 allHits=False, 
+                 taxfilter=None,
+                 filterType=0,
+                 codon_usage=None,
+                 threads=1,):
+        self.fasta = fasta
+        self.annotation = annotation
+        self.format = format 
+        self.gap_limit = gap_limit
+        self.evalue_cutoff = evalue_cutoff 
+        self.allHits = allHits
+        self.filter = taxfilter
+        self.filterType = filterType
+        self.codon_usage = codon_usage
+        self.threads = threads
+
+        if self.format in ["blastxml", "rapsearch2"]:
+            #Initilise BLAST XML parser
+            self.parser = BlastXMLParser(self.annotation, allHits=self.allHits, evalue=self.evalue_cutoff, taxFilter=self.filter, taxFilterType=self.filterType)
+        #elif format == "pslx": #Not fully implemented yet
+            #Initilise BLAT PSLX parser
+            #parser = BlatPSLXParser(annotation, allHits=allHits, evalue=evalue_cutoff, taxFilter=filter, taxFilterType=filterType)        
+        else:
+            raise RuntimeError("Annotation format is not recognized.")
+
+    def run(self, outfile=None):
+        """Run HSP-Tiler and yield tiles generated for each contig
+
+        Parameters:
+        ___________
+        outfile : file-like object to save correct sequences to. Optional.
+
+        Return:
+        _______
+        tile : a Tile_Path object of the correct sequences
+            can be written to a file, or yielded as a generator
+        """
+        if self.threads > 1:
+            fasta1, fasta2 = tee(self.fasta)
+            numSequences = sum(1 for line in fasta1 if line.startswith(">"))
+            chunks = numSequences/(threads-1)+1
+            contigs = read_fasta(fasta2)
+            sequence_info = izip_missing(contigs, self.parser.parse(), key=lambda x: x.name, fillvalue=None)
+
+            pool = Pool()
+            corrected_sequences = pool.imap(self.correct_frameshifts, sequence_info, chunks)
+        else:
+            #Read fasta
+            contigs = read_fasta(self.fasta)
+            # get list of hsps for highest scoring hit for each contig - go to next contig if no hits
+            corrected_sequences = imap(self.correct_frameshifts, izip_missing(contigs, self.parser.parse(), key=lambda x: x.name, fillvalue=None))
+
+        if outfile is not None:
+            #Write corrected sequences
+            for tile in corrected_sequences:
+                tile.write(outfile)
+        else:
+            return corrected_sequences
+        
+
+    def correct_frameshifts(self, *args):
+        """Correct frameshifts
+
+        Parameters:
+        ___________
+        contig - DNASequence object to correct
+        matches - Matches object
+
+        Returns:
+        ________
+        tile - corrected sequence
+        """
+        if len(args) == 1:
+            contig, matches = args[0][0], args[0][1]
+        elif len(args) == 2:
+            contig, matches = args[0], args[1]
+        else:
+            raise RuntimeError("Wrong number of parameters.")
+
+        print contig.name
+
         print >> logfile, "\nNext contig:"
         print >> logfile, str(contig)
 
@@ -627,11 +752,10 @@ def run(fasta,
         if not hsp_list or hsp_list is None:
             print >> logfile, "No hits for {}".format(contig.name)
             contig.description += " [GI=None;S=0.0]"
-            yield EmptyTilePath(contig)
-            continue
+            return EmptyTilePath(contig)
              
         # Initialise tile using highest scoring hsp (first in list) 
-        tile = Tile_Path (hsp_list[0], contig, codon_usage=codon_usage) 
+        tile = Tile_Path (hsp_list[0], contig, codon_usage=self.codon_usage) 
         hsp_list[0].used = True # mark that this hsp has been used
         print >> logfile, "Starting tile..."
         hsp_list[0].printer(logfile)
@@ -640,8 +764,7 @@ def run(fasta,
         # go to next contig if only one hsp in list
         if len(hsp_list) == 1:
             print >> logfile, "Only one hsp for this hit.  Tile is complete"
-            yield tile
-            continue # next contig
+            return tile
 
         # if >1 hsp, attempt to create a tile
         else: 
@@ -716,7 +839,7 @@ def run(fasta,
                                 assert hsp.query_start > tile.end 
 
                             # check if hsp is close enough to tile to incorporate
-                            if distance > gap_limit: 
+                            if distance > self.gap_limit: 
                                 print >> logfile, "Too far away to tile"
                                 # go to next hsp but do not mark as incorporated as may be able 
                                 # to add in a later iteration    
@@ -761,11 +884,11 @@ def run(fasta,
                                     continue
 
         #Fix gaps if codon usage table supplied
-        if codon_usage and "X" in tile.nt_seq:
+        if self.codon_usage and "X" in tile.nt_seq:
             tile.determineGaps()
 
         # add unchanged contig to output if no changes made. Add tile sequence if changes have been made.
-        yield tile
+        return tile
 
 def izip_missing(iterA, iterB, **kwds):
     """Iterate through two iterables, while making sure they are in the same
@@ -863,6 +986,11 @@ def parse_args(args):
     parser.add_argument("--filterType",
                         default=0, #0 for ncbi, 1 for uniprot
                         help="Regex to retreive taxon info from hit. Use 0 for NCBI, or 1 for uniprot, or the full regex query")
+    #Use threads if there are a lot of sequences
+    parser.add_argument("-t", "--threads",
+                        default=1,
+                        type=int,
+                        help="Number of threads to use. Default is 1")
     #Use codon usage to fill gaps?
     codonUsageGroup = parser.add_mutually_exclusive_group()
     codonUsageGroup.add_argument("--codon_usage",
@@ -872,19 +1000,10 @@ def parse_args(args):
                                  action="store_true",
                                  help="Compute the codon usage table for given fasta sequences")
     #Handle sequences with no hits
-    noHitGroup = parser.add_mutually_exclusive_group()
-    noHitGroup.add_argument("--ignoreNoHit",
-                            default=True,
-                            action="store_true",
-                            help="Ignore sequence if there are no BLAST hits")
-    noHitGroup.add_argument("--noHitORF",
-                            default=False,
-                            action="store_true",
-                            help="Output the longest open reading frame for the sequences with no BLAST hits")
-    noHitGroup.add_argument("--noHitFrame1",
-                            default=False,
-                            action="store_true",
-                            help="Output the first reading frame for the sequences with no BLAST hits")
+    parser.add_argument("--no_hit",
+                       choices=range(3),
+                       default=0,
+                       help="hande sequences with no annotation: 0=Ignore; 1=Output longest ORF; 2=Output frame 1")
     #Define output
     parser.add_argument("-p", "--protein",
                         default=False,
@@ -926,8 +1045,6 @@ def parse_args(args):
 
     return args
 
-
-
 def main(args):
     #Parse arguments
     args = parse_args(args)
@@ -947,35 +1064,20 @@ def main(args):
                                                                                                        args.useHit1,
                                                                                                        args.filter)
 
-    #Run hsp_tiler
-    for tile in run(args.contigs, 
-                    args.annotation,
-                    args.format, 
-                    gap_limit=args.gap_limit,
-                    evalue_cutoff=args.evalue_cutoff, 
-                    allHits=not args.useHit1, 
-                    filter=args.filter,
-                    filterType=args.filterType,
-                    codon_usage=args.codon_usage
-                    ):
-        if type(tile) == EmptyTilePath:
-            if args.noHitORF:
-                tile.useLongestORF()
-            elif args.noHitFrame1:
-                #This will be done automatically
-                pass
-            else:
-                #Ignore Hit, default
-                continue
-        else:
-            #Save the protein coding region (tile expanded to closest start and stop codons)
-            tile.extendReadingFrame()
+    
 
-        if args.protein:
-            tile.outputProtein()
-        
-        #Save the tiles region
-        print >> args.outfile, tile
+
+    hsp_tiler = HSPTiler(args.contigs, 
+                         args.annotation,
+                         args.format, 
+                         gap_limit=args.gap_limit,
+                         evalue_cutoff=args.evalue_cutoff, 
+                         allHits=not args.useHit1, 
+                         taxfilter=args.filter,
+                         filterType=args.filterType,
+                         codon_usage=args.codon_usage)
+
+    hsp_tiler.run(args.outfile)
 
     #Cleanup
     logfile.close()
