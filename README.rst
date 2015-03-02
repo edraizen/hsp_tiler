@@ -16,6 +16,8 @@ The program requires two inputs, a FASTA file and a BLASTX annotation file, but 
 
 • -a, –annotation Path to annotation file, which is by default a BLASTX output in BLAST-XML format. Each contig query will have a hits containing HSPs, or high-scoring segment pairs. HSP-Tiler does not run BLAST itself, so the user must run BLASTX before using HSP-Tiler. BLASTX against the non-redundant (nr) database from NCBI leads to the best results.
 
+Optional:
+
 • –format Format of the annotation file. Can use output from BLASTX (xml (default), or tabs with specified format), BLAT PSLX, and RapSearch2.
 
 • -g, –gap_limit Tell the program to only include HSPSs where the gap between the current HSP and the tile are less than the gap cutoff, otherwise they are ignored.
@@ -41,9 +43,3 @@ The program requires two inputs, a FASTA file and a BLASTX annotation file, but 
 • –noHitORF Output the longest open reading frame for the sequences with no BLAST hits
 
 • –noHitFrame1 Output the first reading frame for the sequences with no BLAST hits • -p, –protein Output protein sequence. Default is false.
-* Free software: BSD license
-* Documentation: http://hsp_tiler.rtfd.org.
-
-
-
-* TODO
