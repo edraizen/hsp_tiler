@@ -10,7 +10,7 @@ six frames and rerun blast. There is a program in HSP-Tiler utiliities to do
 this called blatx.py 
 
 Command:
-blatc.py contigs.fa proteins.fa
+blatx.py contigs.fa proteins.fa
 blat -prot -out=pslx nr.fa proteins.fa
 """
 

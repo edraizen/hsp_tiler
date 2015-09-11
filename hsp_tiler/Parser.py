@@ -45,9 +45,9 @@ class Parser(object):
         """
         if self.taxRegex is None:
             if not self.taxFilterType in regexTaxFilters:
-                self.taxFilterType = re.compile(taxFilterType)
+                self.taxFilterType = re.compile(self.taxFilterType)
             else:
-                self.taxFilterType = regexTaxFilters[taxFilterType]
+                self.taxFilterType = regexTaxFilters[self.taxFilterType]
 
         try:
             #Parse out genus and species if exists
@@ -80,8 +80,8 @@ class Match(object):
     to see if HSP has already be tiled.
 
     Must be subclassed to add required information specified by each format.
-    """
-    #Required information for the Match, set in init!
+    
+    Required information for the Match, set in init:
     frame = 1
     strand = 1
     query_start = 0
@@ -94,6 +94,8 @@ class Match(object):
     used = False 
     num = 0
     query_seq = ""
+    """
+    
 
     def __init__(self, hsp):
         """Initialise a Match object. Must override this method to set the
@@ -104,6 +106,53 @@ class Match(object):
         hsp : Element object containing HSP information
         """
         raise NotImplementedError
+
+    def __lt__(self, other):
+        return self.query_start < other
+
+    def __le__(self, other):
+        return self.query_start <= other
+
+    def __gt__(self, other):
+        return self.query_end > other
+
+    def __ge__(self, other):
+        return self.query_end >= other
+
+    def __eq__(self, other):
+        return self.query_start<=other<self.query_end
+
+    def __repr__(self):
+        """Print out the match as a BLAST tab output with fields:
+        qseqid, sseqid, qstart, qend, sstart, send, evalue, bitscore
+        """
+        return "\t".join((self.hitID, str(self.query_start), str(self.query_end), 
+                    str(self.hit_start), str(self.hit_end), str(self.evalue), 
+                    str(self.bitscore)))
+
+    def normalized_bitscore(self, max_bitscore):
+        """Calculate the normalized bitscore of a contig as a ratio of the best 
+        possible bitscore
+
+        Parameters:
+        ___________
+        max_bitscore : float. The bitscore of the hit protein against the
+            database it came from. E.g. if contig1's best hit was from a protein
+            with gi 1234, the protein 1234 is re-blasted and is used as the max
+            bitscore.
+
+        Return:
+        _______
+        normalized_bitscore : float
+        """
+        #print "bitscore={}, max_bitscore={}, ratio={}".format(self.bitscore,max_bitscore,self.bitscore/float(max_bitscore))
+        #print "3*hit_length={}, query_length={}, ratio={}".format(3*self.hit_length, self.query_length, 3*self.hit_length/float(self.query_length))
+        #print "normalized_bitscore=",(self.bitscore/float(max_bitscore))*(3*self.hit_length/float(self.query_length))
+        if self.bitscore > max_bitscore:
+            print self.hitID, self.bitscore, max_bitscore
+            print self
+            #assert 0
+        return (self.bitscore/float(max_bitscore))*(3*self.hit_length/float(self.query_length))
         
     def printer (self, logfile):
         """Writes hsp information to global log File
@@ -119,12 +168,18 @@ class Match(object):
 
 class Matches(object):
     """Store matches with the contig name they come from"""
-    def __init__(self, name, matches):
+    def __init__(self, contig_name, matches):
         """
         Paramters:
         __________
         name : name of contig
         matches : iterable of Match objects
         """
-        self.name = name
-        self.matches = matches
+        self.contig_name = contig_name
+        self.matches = list(matches)
+
+    def __repr__(self):
+        tmp = ""
+        for match in self.matches:
+            tmp += "{}\t{}\n".format(self.contig_name, match)
+        return tmp

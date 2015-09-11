@@ -14,7 +14,8 @@ import prettyplotlib as ppl
 import numpy as np
 from prettyplotlib import plt
 import matplotlib as mpl
-#import matplotlib.pyplot as plt
+from matplotlib import pyplot
+import matplotlib.pyplot as plt
 from prettyplotlib import brewer2mpl
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -43,6 +44,7 @@ def scatter(original, updated, main="", save=None):
     negativeImprovement = []
     noImprovement = 0
     for o, u in izip(original, updated):
+        print o,u
         if int(o) == int(u):
             noImprovement +=1
         elif u > o:
@@ -53,15 +55,16 @@ def scatter(original, updated, main="", save=None):
             noImprovement +=1
 
     if not positiveImprovement:
-        positiveImprovement = [()]
+        positiveImprovement = []
     if not negativeImprovement:
-        negativeImprovement = [()]
+        negativeImprovement = []
 
     print positiveImprovement
     print negativeImprovement
     print noImprovement
 
     #Set deimensions
+    print positiveImprovement+negativeImprovement
     x, y = zip(*positiveImprovement+negativeImprovement)
     xMax = int(round(sorted(x)[-1]/500.0)*500.0)
     yMax = int(round(sorted(y)[-1]/500.0)*500.0)
@@ -140,8 +143,10 @@ def histogram(original, updated, bins=None, main="", save=None, log=False):
     fig, ax = plt.subplots()
     ax.set_title(main)
     ax.set_xlabel("Improvement (updated-original) bitscores")
-    ax.set_ylabel("log(Frequency)")
-    #ax.set_yscale('log')
+    y_label = "log(Frequency)" if log else "Frequency"
+    ax.set_ylabel(y_label)
+    #if log:
+    #    ax.set_yscale('log')
 
     width = 1.0
     #ax.set_xticks(np.arange(len(improvements)))
@@ -152,7 +157,22 @@ def histogram(original, updated, bins=None, main="", save=None, log=False):
     if save is None:
         plt.show()
     else:
-        plt.savefig(save)
+        #plt.savefig(save)
+        pp = PdfPages(save)
+        pp.savefig(fig)
+        pp.close()
+
+def hist2(original, updated, bins=45, main="", save=None, log=False):
+    """
+    """
+    colors = brewer2mpl.get_map('Set1', 'qualitative', 9).mpl_colors
+    pyplot.hist(original, label="Original Bitscores", color=colors[3], bins=bins)
+    pyplot.hist(updated, color=colors[4], alpha=0.6, bins=bins, label="Updated Bitscores")
+    pyplot.title("Histogram of bitscores")
+    pyplot.xlabel("Bitscore")
+    pyplot.ylabel("Frequency")
+    pyplot.legend(loc='upper center')
+    pyplot.show()
 
 def bar(*args, **kwargs):
     """
@@ -429,11 +449,16 @@ if __name__ == "__main__":
     #Parse arguments
     args = parse_args()
 
-    print args
+    original_scores = []
+    updated_scores = []
+    scores = []
+    for o, u, s in read_scores(args.scores):
+        original_scores.append(o)
+        updated_scores.append(u)
+        scores.append(s)
 
-    original_scores, updated_scores, scores = read_scores(args.scores)
-
-    analyze(original_scores, updated_scores, scatterName=args.scatterplot, histName=args.histogram)
+    analyze(original_scores, updated_scores, scatterName=args.scatterplot, histName=args.histogram, log=args.log)
+    hist2(original_scores, updated_scores)
 
 
 

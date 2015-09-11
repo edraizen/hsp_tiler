@@ -102,11 +102,21 @@ class Tile_Path(object):
         #Output proteins sequences instead ot nts
         self.protein = protein
 
-    def __str__(self):
+        print >> logfile, str(self)
+
+    def __repr__(self):
         """Print tile sequence if changes have been made, else return unchanged 
         contig.
         """
-        seq = self.nt_seq if not self.protein else self.aa_seq
+        if self.saveProteinCoding:
+            #Save the protein coding region (tile expanded to closest start and stop codons)
+            self.extendReadingFrame()
+
+        if self.protein:
+            seq = self.aa_seq
+        else:
+            seq = self.nt_seq if self.strand == 1 else self.nt_seq.revcomp()
+
         seq.description = self._getDescription()
 
         return str(seq)
@@ -122,14 +132,8 @@ class Tile_Path(object):
         ________
         tile append to outfile
         """
-        #Save the protein coding region (tile expanded to closest start and stop codons)
-        self.extendReadingFrame()
-
-        if self.protein:
-            tile.outputProtein()
-        
         #Save the tiles region
-        print >> outfile, self
+        print >> outfile, str(self)
 
     def outputProtein(self, protein=True):
         """Output protein sequence when being printed
@@ -148,7 +152,7 @@ class Tile_Path(object):
         header.
         """
         return "[Start={};Frame={};GI={};S={}]".format(self.start, 
-                                                       self.frame, 
+                                                       self.frame*self.strand, 
                                                        self.hitID, 
                                                        self.bitscore)
 
@@ -366,21 +370,13 @@ class Tile_Path(object):
                 break 
             start -= 3
 
-        #Make sure that start is actaully a start or stop codon
-        if not self.contig.sequence[start:start+3] in codons:
-            start = self.start
-            print >> logfile, "Warning, contig {} has no first stop codon within frame".format(self.contig.name)
-
-
         #Find closest stop codon
         end = self.end-3
         while end<=len(self.contig.sequence)-3 and not self.contig.sequence[end:end+3] in stopCodons:
             end += 3
 
-        #Make sure that stop is actually a stop codon
-        if not self.contig.sequence[end:end+3] in stopCodons:
-            end = self.end-3
-            print >> logfile, "Warning, contig {} has no stop codon within frame".format(self.contig.name)
+        if self.contig.sequence[end:end+3] in stopCodons:
+            end += 3
 
         self.start = start
         self.end = end+3
@@ -651,7 +647,7 @@ class EmptyTilePath(Tile_Path):
             self.outputProtein()
         
         #Save the tiles region
-        print >> outfile, self
+        print >> outfile, str(self)
 
 class HSPTiler(object):
     """Main corrector here
@@ -706,7 +702,7 @@ class HSPTiler(object):
             contigs = read_fasta(fasta2)
             sequence_info = izip_missing(contigs, self.parser.parse(), key=lambda x: x.name, fillvalue=None)
 
-            pool = Pool()
+            pool = Pool(self.threads-1)
             corrected_sequences = pool.imap(self.correct_frameshifts, sequence_info, chunks)
         else:
             #Read fasta
@@ -890,58 +886,6 @@ class HSPTiler(object):
         # add unchanged contig to output if no changes made. Add tile sequence if changes have been made.
         return tile
 
-def izip_missing(iterA, iterB, **kwds):
-    """Iterate through two iterables, while making sure they are in the same
-    order. If there are missing values, you can skip the value entirely or 
-    return only the iterator with the value and a special fill value.
-
-    Parameters:
-    ___________
-    iterA : the first iterator
-    iterB : the second iterator
-    key : function that returns items to compare. Must return strings, ints, or
-        an object with the __lt__, __gt__, and __eq__ methods. Optional.
-    fillvalue : The value to return if the item is missing. Optional.
-
-    Returns:
-    ________
-    A : item from first iterator, or fillValue
-    B : item from second iterator, or fillValue
-    """
-    #Get the comparison function
-    key = kwds.get("key")
-    if key is None:
-        key = lambda x: x
-
-    useMissing = False
-    fillValue = ""
-    if "fillvalue" in kwds:
-        useMissing = True
-        fillvalue = kwds["fillvalue"]
-
-    #Start both iterators
-    A = iterA.next()
-    B = iterB.next()
-
-    try:
-        while True:
-            if key(A) == key(B):
-                yield A, B
-                A = iterA.next()
-                B = iterB.next()
-            elif key(A) < key(B):
-                if useMissing:
-                    yield A, fillvalue
-                A = iterA.next()
-            elif key(A) > key(B):
-                if useMissing:
-                    yield fillvalue, B
-                B = iterB.next()
-            else:
-                raise RuntimeError("Invalid compartor")
-    except StopIteration:
-        pass
-
 #######################################
 #Main
 #######################################
@@ -1063,9 +1007,6 @@ def main(args):
                                                                                                        args.evalue_cutoff,
                                                                                                        args.useHit1,
                                                                                                        args.filter)
-
-    
-
 
     hsp_tiler = HSPTiler(args.contigs, 
                          args.annotation,

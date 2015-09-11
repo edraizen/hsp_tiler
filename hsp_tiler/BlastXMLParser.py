@@ -26,23 +26,34 @@ class HSP(Match):
         frame = int(hsp.find('Hsp_query-frame').text)
         if rapsearch:
         	#1 = frames 0,1,2; -1 = frames 3,4,5
-        	self.frame = frame % 3
+        	self.frame = (frame%3)+1
         	self.strand = 1 if frame < 3 else -1
+
+        	if frame >= 3:
+        		#RAPSearch2 switches start and from, switch back
+        		self.query_start = int(hsp.find('Hsp_query-to').text)-1 #position in nts relative to query
+        		self.query_end = int(hsp.find('Hsp_query-from').text)
+        	else:
+        		self.query_start = int(hsp.find('Hsp_query-from').text)-1 #position in nts relative to query
+        		self.query_end = int(hsp.find('Hsp_query-to').text)
         else:
 	        # 1 = frames 1,2,3; -1 = frames -1,-2,-3 
 	        self.frame = abs(frame)
 	        self.strand = 1 if 0<frame<=3 else -1
-        
-        self.query_start = int(hsp.find('Hsp_query-from').text)-1 #position in nts relative to query
-        self.query_end = int(hsp.find('Hsp_query-to').text)
+        	self.query_start = int(hsp.find('Hsp_query-from').text)-1 #position in nts relative to query
+        	self.query_end = int(hsp.find('Hsp_query-to').text)
+        self.query_length = self.query_end-self.query_start+1
+
         self.hit_start = int(hsp.find('Hsp_hit-from').text)-1 #position in aas relative to hit
         self.hit_end = int(hsp.find('Hsp_hit-to').text)
+        self.hit_length = self.hit_end-self.hit_start+1
 
         try:
         	self.evalue = float(hsp.find('Hsp_evalue').text)
         except:
         	try:
-        		self.evalue = exp(float(hsp.find('Hsp_log-evalue').text))
+        		#Already converted evalue in parser
+        		self.evalue = float(hsp.find('Hsp_log-evalue').text)
         	except:
         		raise RuntimeError("XML file must be from BLASTX or RAPSearch2")
 
@@ -129,11 +140,7 @@ class BlastXMLParser(Parser):
 
 		for event, elem in self.context:
 			if event == "end" and elem.tag == "Hit_id":
-				try:
-					#Assume NCBI headers
-					hitID = elem.text.split("|")[1] #field is 'gi|XXXXX|ref|abcd', save XXXX
-				except:
-					hitID = elem.text #just use the whole hit id
+				hitID = self._getGI(elem.text)
 			elif event == "end" and elem.tag == "Hit_def":
 				#Get species and genus for use with filter
 
@@ -142,7 +149,7 @@ class BlastXMLParser(Parser):
 
 				if hitID is None:
 					#RAPSearch doesn't use Hit_id
-					hitID = elem.text
+					hitID = self._getGI(elem.text)
 
 				#Returns all HSP if there is no fitler, else only return HSPS that do not contain filter
 				returnHsp = self._filterTaxa(elem.text) if self.taxFilter else True
@@ -161,13 +168,23 @@ class BlastXMLParser(Parser):
 				#Add the hitID to current HSP to process later
 				hitElement = ET.SubElement(elem, "hitID")
 				hitElement.text = hitID
-				yield HSP(elem, rapsearch=self.rapsearch)
+				hsp = HSP(elem, rapsearch=self.rapsearch)
+				yield hsp
 			elif not self.allHits and event == "end" and elem.tag == "Hit_hsps":
 				#Stop after 1st HSP hits are finished
 				break
 			elif self.allHits and event == "end" and elem.tag == "Iteration_hits":
 				#Stop after all of HSPs from every hit are finished
 				break
+
+	def _getGI(self, description):
+		try:
+			#Assume NCBI headers
+			hitID = description.split("|")[1] #field is 'gi|XXXXX|ref|abcd', save XXXX
+		except:
+			hitID = description #just use the whole hit id
+
+		return hitID
 
 if __name__ == "__main__":
 	try:
